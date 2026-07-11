@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["pydantic>=2", "pyarrow>=17"]
+# dependencies = ["msgspec>=0.18", "pyarrow>=17"]
 # ///
 """
-Verify that the Rust fastingest output (Arrow IPC) matches the original
-Python path (gzip -> json -> Pydantic job_schema -> flatten) value-for-value.
+Verify that the Rust fastingest output (Arrow IPC) matches the Python path
+(gzip -> msgspec job_schema decode+validate -> flatten) value-for-value.
+The Python path here is exactly the msgspec engine of
+ingest_and_benchmark.py — schema, COLUMNS, and flatten() are all imported
+from job_schema.py — so this doubles as the cross-engine equivalence check.
 
 Byte-exact equality is NOT expected for JSON-text and datetime columns
 (whitespace, fractional-second padding, "+00:00" vs "Z"); those are compared
 at the value level. Everything else must match exactly.
 
-The Arrow file must come from a FULL run (`ingest_and_benchmark.py --full`,
-or any first run): incremental runs write only the delta rows, so sampled
-files would be reported as missing.
+The Arrow file must come from a FULL run of the Rust sidecar: incremental
+runs write only the delta rows, so sampled files would be reported as
+missing. ingest_and_benchmark.py deletes jobs.arrow once loaded, so invoke
+the binary directly first:
 
-Usage:
-    uv run verify_parity.py --json-dir data/raw/json \
-        --arrow data/processed/jobs.arrow --n 500
+    fastingest/target/release/fastingest data/raw/json data/processed --full
+    uv run verify_parity.py --n 500
 """
 
 from __future__ import annotations
@@ -30,24 +33,12 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import msgspec
 import pyarrow as pa
 import pyarrow.ipc
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from job_schema import JobPage  # noqa: E402
-
-COLUMNS = [
-    "id", "source", "board_token", "apply_url", "requisition_id",
-    "collapse_key", "is_expired", "title", "job_title_raw", "description",
-    "core_job_title", "job_category", "seniority_level", "role_type",
-    "workplace_type", "formatted_workplace_location", "workplace_countries",
-    "min_industry_and_role_yoe", "yearly_min_compensation",
-    "yearly_max_compensation", "listed_compensation_currency",
-    "technical_tools", "estimated_publish_date", "company_name",
-    "company_website", "enriched_status", "nb_employees", "year_founded",
-    "latitude", "longitude", "job_information_json",
-    "v5_processed_job_data_json", "enriched_company_data_json",
-]
+from job_schema import COLUMNS, decode_page, flatten  # noqa: E402
 
 # JSON-array/object text columns: compare parsed values (and key order).
 JSON_COLUMNS = {
@@ -56,55 +47,6 @@ JSON_COLUMNS = {
 }
 # Datetime-valued keys inside the JSON blobs, normalized before comparison.
 BLOB_DATETIME_KEYS = {"estimated_publish_date", "enriched_at"}
-
-
-def flatten(page: JobPage) -> tuple:
-    """The original flatten() from ingest_and_benchmark.py, kept verbatim."""
-    job = page.pageProps.job
-    ji = job.job_information
-    v5 = job.v5_processed_job_data
-    ec = job.enriched_company_data
-
-    lat = job.geoloc[0].lat if job.geoloc else None
-    lon = job.geoloc[0].lon if job.geoloc else None
-
-    ji_blob = json.dumps(ji.model_dump(exclude={"description"}))
-
-    return (
-        job.id,
-        job.source,
-        str(job.board_token),
-        job.apply_url,
-        job.requisition_id,
-        job.collapse_key,
-        job.is_expired,
-        ji.title,
-        ji.job_title_raw,
-        ji.description,
-        v5.core_job_title,
-        v5.job_category,
-        v5.seniority_level,
-        v5.role_type,
-        v5.workplace_type,
-        v5.formatted_workplace_location,
-        json.dumps(v5.workplace_countries),
-        v5.min_industry_and_role_yoe,
-        v5.yearly_min_compensation,
-        v5.yearly_max_compensation,
-        v5.listed_compensation_currency,
-        json.dumps(v5.technical_tools),
-        v5.estimated_publish_date.isoformat() if v5.estimated_publish_date else None,
-        v5.company_name,
-        v5.company_website,
-        ec.status if ec else None,
-        ec.nb_employees if ec else None,
-        ec.year_founded if ec else None,
-        lat,
-        lon,
-        ji_blob,
-        v5.model_dump_json(by_alias=True),
-        ec.model_dump_json() if ec else None,
-    )
 
 
 def _normalize_json_value(v, key: str | None = None):
@@ -164,7 +106,7 @@ def main() -> None:
         sys.exit(
             f"Arrow table has {table.num_rows} rows but {args.json_dir} has "
             f"{len(files)} files — looks like a delta from an incremental "
-            f"run. Re-run `ingest_and_benchmark.py --full` first."
+            f"run. Re-run `fastingest ... --full` first."
         )
     rng = random.Random(args.seed)
     sample = rng.sample(files, min(args.n, len(files)))
@@ -174,12 +116,11 @@ def main() -> None:
     mismatch_counts: dict[str, int] = {}
     first_diffs: list[str] = []
     for path in sample:
-        with gzip.open(path, "rt", encoding="utf-8") as fh:
-            raw = json.load(fh)
+        raw = gzip.decompress(path.read_bytes())
         try:
-            page = JobPage.model_validate(raw)
-        except Exception:
-            skipped += 1  # invalid under Pydantic; Rust error-count check covers these
+            page = decode_page(raw)
+        except msgspec.DecodeError:
+            skipped += 1  # invalid under msgspec; Rust error-count check covers these
             continue
         py_row = flatten(page)
         rid = py_row[COLUMNS.index("requisition_id")]
@@ -200,7 +141,7 @@ def main() -> None:
                     first_diffs.append(f"{path.name} [{col}]: {err}")
         checked += 1
 
-    print(f"Checked {checked} files ({skipped} skipped as Pydantic-invalid)")
+    print(f"Checked {checked} files ({skipped} skipped as msgspec-invalid)")
     if mismatch_counts:
         print("\nMISMATCHES per column:")
         for col, n in sorted(mismatch_counts.items(), key=lambda kv: -kv[1]):

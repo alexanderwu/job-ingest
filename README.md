@@ -6,48 +6,61 @@ validation, and benchmarks the two backends. Ingest is **incremental**:
 repeat runs parse and upsert only new/changed files.
 
 The parse+validate phase originally ran single-threaded in Python
-(stdlib `json` + Pydantic v2) and took **~53 s**. It is now done by a Rust
-sidecar and takes **~0.6 s** — an **~84x speedup** — putting a full rebuild
-(parse → validate → flatten → load both DBs) at **~2.5 s**, and a no-change
-incremental run at **~0.1 s**.
+(stdlib `json` + Pydantic v2) and took **~53 s**. There are now two
+interchangeable engines, selected with `--engine`:
+
+- **msgspec (default)** — the schema as `msgspec.Struct`s in
+  `job_schema.py`; decode+validate in one C pass, in-process, pure-Python
+  packaging. **~2.8 s** for the full corpus single-threaded, **~1.3 s**
+  with `--workers 8`.
+- **rust** — the fastingest serde sidecar: **~0.67 s**, but needs a Rust
+  toolchain.
+
+Both keep the same `ingest_manifest.json`, so you can switch engines
+between runs; a no-change incremental run is **~0.1–0.3 s** either way.
 
 ## Benchmark (16,076 files, 0 validation errors)
 
-| stage                     | before  | after      |
-|---------------------------|---------|------------|
-| parse + validate          | ~53 s   | **0.67 s** |
-| SQLite insert             | ~1.4 s  | 1.20 s     |
-| DuckDB insert             | ~1.3 s  | **0.57 s** |
-| DuckDB total (parse+load) | ~54 s   | **1.2 s**  |
-| incremental, no changes   | (n/a)   | **~0.1 s** |
+| stage                     | Pydantic (before) | msgspec (default)     | Rust (`--engine rust`) |
+|---------------------------|---------|--------------------------------|------------|
+| parse + validate          | ~53 s   | 2.8 s (1.25 s, 8 workers)      | **0.67 s** |
+| SQLite insert             | ~1.4 s  | 1.04 s                         | 1.20 s     |
+| DuckDB insert             | ~1.3 s  | 0.58 s                         | **0.57 s** |
+| DuckDB total (parse+load) | ~54 s   | 3.4 s                          | **1.2 s**  |
+| incremental, no changes   | (n/a)   | ~0.3 s                         | **~0.1 s** |
 
-Notes: the 0.67 s includes process spawn and reading the Arrow file back into
-Python; the Rust binary alone parses everything in ~0.5 s warm. The very
-first run after a reboot pays Windows file-cache/Defender overhead on 16k
-small file opens (~5 s). DuckDB's insert dropped ~3x because it now
-bulk-ingests a columnar Arrow table instead of row-wise `executemany`; the
-SQLite insert now happens inside the Rust sidecar via rusqlite (no Arrow
-round-trip or Python tuple materialization).
+Notes: the Rust 0.67 s includes process spawn and reading the Arrow file
+back into Python; the binary alone parses everything in ~0.5 s warm. The
+very first run after a reboot pays Windows file-cache/Defender overhead on
+16k small file opens (~5 s). DuckDB's insert dropped ~3x vs the original
+because it bulk-ingests a columnar Arrow table instead of row-wise
+`executemany`; the SQLite insert happens inside whichever engine parsed
+(rusqlite in the sidecar, stdlib `sqlite3` `executemany` in the msgspec
+engine — same DDL, pragmas, and single transaction).
 
 ## Architecture
 
 ```
 data/raw/json/*.json.gz
-        │  fastingest (Rust): stat all files, skip those unchanged per
-        │    ingest_manifest.json; for the rest, rayon-parallel per file —
-        │    fs::read → flate2(zlib-rs) gunzip → serde_json parse into
-        │    typed structs (= validation) → flatten to 33 columns
-        ├─→ SQLite  jobs.sqlite   (rusqlite, INSERT OR REPLACE, one tx)
-        ├─→ jobs.arrow            (Arrow IPC handoff; full corpus or delta)
+        │  engine (--engine, default msgspec): stat all files, skip those
+        │  unchanged per ingest_manifest.json; parse+validate+flatten the
+        │  rest to 33-column rows —
+        │    msgspec: in-process Python, gzip → msgspec Struct decode
+        │      (job_schema.py); --workers N fans out over a process pool
+        │    rust:    fastingest sidecar, rayon-parallel fs::read →
+        │      flate2(zlib-rs) gunzip → serde_json into typed structs;
+        │      hands its rows back as jobs.arrow (Arrow IPC, transient —
+        │      deleted once loaded; the msgspec engine needs no handoff
+        │      file, its Arrow table stays in-process)
+        ├─→ SQLite  jobs.sqlite   (INSERT OR REPLACE, one tx; rusqlite or
+        │                          stdlib sqlite3 — same DDL and pragmas)
         ├─→ jobs.parquet          (--parquet, zstd; full runs only)
         ▼
-jobs.arrow  (+ stats JSON on stdout)
+Arrow table of this run's rows
         │  ingest_and_benchmark.py (uv run, PEP 723 deps)
         ├─→ DuckDB  jobs.duckdb   (register Arrow table → INSERT OR REPLACE)
-        ├─→ jobs.parquet          (--parquet on incremental runs: DuckDB
-        │                          COPY of the full table, zstd)
-        └─→ jobs.arrow is deleted once loaded -- it's a transient
-             handoff file, not a durable output
+        └─→ jobs.parquet          (--parquet on incremental runs: DuckDB
+                                   COPY of the full table, zstd)
 ```
 
 Both databases key on `requisition_id` and are fed with `INSERT OR
@@ -62,7 +75,7 @@ full run.
 - **`fastingest/`** — Rust crate.
   - `src/schema.rs`: serde mirror of `job_schema.py`, field-for-field and in
     the same order (so the JSON blob columns round-trip with identical key
-    order). Handles the Pydantic aliases (`401k_matching`,
+    order). Handles the field aliases (`401k_matching`,
     `bi-weekly_*_compensation`, `_geoloc`, `__N_SSG`, camelCase user-activity
     arrays), `str | int` unions (untagged enum), `null → []` list
     normalization, and RFC 3339 datetime validation via chrono.
@@ -78,24 +91,36 @@ full run.
   - `src/main.rs`: arg parsing (`--limit/--full/--parquet`), change
     detection, rayon pipeline, per-file error count-and-continue (exit 0,
     samples reported in the stats JSON).
-- **`ingest_and_benchmark.py`** — subprocesses the binary (auto-rebuilds via
-  cargo when sources are newer than the exe), decides full-vs-incremental,
-  upserts the Arrow (delta) table into DuckDB, and handles the incremental
-  `--parquet` export.
-- **`verify_parity.py`** — samples N random files, runs the *original*
-  gzip → json → Pydantic → `flatten()` path, and compares all 33 values per
-  row against the Arrow output. JSON/datetime columns are compared at the
-  value level (whitespace and `Z` vs `+00:00` formatting are not meaningful);
-  everything else must match exactly, and blob key order is asserted.
-- **`job_schema.py`** — unchanged; remains the documented source of truth
-  and the reference implementation that parity is checked against.
+- **`ingest_and_benchmark.py`** — decides full-vs-incremental, runs the
+  selected engine, upserts the (delta) Arrow table into DuckDB, and handles
+  the incremental `--parquet` export. Houses the msgspec engine (manifest
+  handling, process-pool parsing, sqlite3 upsert); for `--engine rust` it
+  subprocesses the binary (auto-rebuilding via cargo when sources are newer
+  than the exe).
+- **`verify_parity.py`** — samples N random files, runs the msgspec path
+  (`decode_page` + `flatten` imported from `job_schema.py`), and compares
+  all 33 values per row against the Rust Arrow output. JSON/datetime
+  columns are compared at the value level (whitespace and `Z` vs `+00:00`
+  formatting are not meaningful); everything else must match exactly, and
+  blob key order is asserted.
+- **`job_schema.py`** — the schema as `msgspec.Struct`s (converted from the
+  original Pydantic v2 models, same classes/fields/order); the Python
+  source of truth. Also home of the shared 33-column `COLUMNS` order and
+  `flatten()`, used by both the msgspec engine and the parity checker.
 
 ## Usage
 
 ```powershell
-# Incremental run (first run is automatically a full rebuild; builds the
-# Rust binary if needed). Defaults: --json-dir data/raw/json --out-dir data/processed
+# Incremental run with the default msgspec engine (first run is
+# automatically a full rebuild).
+# Defaults: --json-dir data/raw/json --out-dir data/processed
 uv run ingest_and_benchmark.py
+
+# Parallelize the msgspec parse over 8 processes:
+uv run ingest_and_benchmark.py --workers 8
+
+# Use the Rust sidecar instead (builds the binary if needed):
+uv run ingest_and_benchmark.py --engine rust
 
 # Force a full rebuild:
 uv run ingest_and_benchmark.py --full
@@ -106,33 +131,35 @@ uv run ingest_and_benchmark.py --parquet
 # Quick run on a subset:
 uv run ingest_and_benchmark.py --limit 2000
 
-# Parity spot-check against the Pydantic reference (exit 1 on any mismatch).
+# Rust-vs-msgspec parity spot-check (exit 1 on any mismatch).
 # ingest_and_benchmark.py deletes jobs.arrow once it's loaded, so generate
 # a fresh full-run one by invoking the Rust binary directly first:
 fastingest/target/release/fastingest data/raw/json data/processed --full
 uv run verify_parity.py --n 500
 ```
 
-Requirements: Rust toolchain (MSVC on Windows; rusqlite's bundled SQLite
-needs a C compiler, which MSVC provides) and `uv` (scripts declare their
-Python deps inline via PEP 723). `requirements.txt` exists for non-uv
-users: `duckdb`, `pyarrow`, `pydantic`.
+Requirements: `uv` (scripts declare their Python deps inline via PEP 723;
+`requirements.txt` exists for non-uv users: `duckdb`, `pyarrow`,
+`msgspec`). A Rust toolchain (MSVC on Windows; rusqlite's bundled SQLite
+needs a C compiler, which MSVC provides) is only needed for
+`--engine rust`.
 
 ## Trade-offs vs alternatives considered
 
-**Rust serde sidecar (chosen)** — fastest option that still does real,
-typed, per-field validation; the struct definitions *are* the schema, so
-malformed files fail loudly. Cost: a second language in the repo, a
-toolchain dependency, and the schema now exists twice (`job_schema.py` +
-`schema.rs`) — any schema change must be made in both places, with
-`verify_parity.py` as the safety net.
+Both of the top two options are now implemented, as the two `--engine`s:
 
-**msgspec Structs (runner-up)** — port the schema to `msgspec.Struct`;
-decode+validate in one C pass, ~10–20x faster than json+Pydantic, pure
-Python packaging. With multiprocessing it would likely land at ~1–3 s —
-close to Rust, with no toolchain or dual-schema cost. The Rust route was
-chosen for maximum headroom; msgspec is the right fallback if maintaining
-the Rust crate ever becomes a burden.
+**msgspec Structs (now the default engine)** — the schema ported to
+`msgspec.Struct`; decode+validate in one C pass, ~19x faster than
+json+Pydantic single-threaded and ~2.3x more with `--workers 8`, pure
+Python packaging, no toolchain. `job_schema.py` stays the single Python
+source of truth (the old Pydantic module was converted, not duplicated).
+
+**Rust serde sidecar (`--engine rust`)** — fastest option that still does
+real, typed, per-field validation; the struct definitions *are* the
+schema, so malformed files fail loudly. Cost: a second language in the
+repo, a toolchain dependency, and the schema exists twice
+(`job_schema.py` + `schema.rs`) — any schema change must be made in both
+places, with `verify_parity.py` as the safety net.
 
 **Keep Pydantic, add orjson + ProcessPoolExecutor** — least churn, one
 schema. But Pydantic validation itself is the bottleneck (not just
@@ -148,17 +175,20 @@ would populate the two databases from different code paths.
 - serde_json's default float parser is fast but can be **1 ULP off**; this
   produced real mismatches (e.g. `105.76923076923077` → `...076`). Fixed
   with the `float_roundtrip` feature — cost is negligible at this scale.
-- Blob columns are **value-equal, not byte-equal**, to the Pydantic output:
-  Python's `json.dumps` inserts spaces, and chrono prints
-  `.657Z` / `+00:00` where Python prints `.657000Z` / `Z`. The parity
-  checker normalizes these; anything consuming the blobs should parse them
-  as JSON rather than compare strings.
-- Rust field order and `#[serde(rename)]` must exactly mirror the Pydantic
-  classes or blob key order silently changes — the parity checker asserts
-  key order to catch this.
-- serde is stricter than Pydantic's lax mode (e.g. no `"5"` → 5.0, no
-  naive datetimes). This corpus is clean (0 errors both ways); if future
-  data trips it, add a targeted `deserialize_with` shim for that field only.
+- Blob columns are **value-equal, not byte-equal**, across engines:
+  chrono and msgspec print datetimes with different fractional-second
+  padding / `Z` vs `+00:00`. The parity checker normalizes these; anything
+  consuming the blobs should parse them as JSON rather than compare strings.
+- Rust field order and `#[serde(rename)]` must exactly mirror the
+  `job_schema.py` classes or blob key order silently changes — the parity
+  checker asserts key order to catch this.
+- serde and msgspec are both stricter than Pydantic's lax mode (e.g. no
+  `"5"` → 5.0, no naive datetimes). This corpus is clean (0 errors all
+  ways); if future data trips it, add a targeted shim for that field only
+  (`deserialize_with` in Rust, a `__post_init__` fixup in Python).
+- msgspec `kw_only=True` is **not inherited** by fields declared on
+  subclasses of a configured base Struct — it must be repeated on every
+  class, or required-after-optional field orders raise at import.
 
 ## Next steps
 

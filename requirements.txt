@@ -2,5 +2,5 @@
 # ingest_and_benchmark.py:
 duckdb>=1.0
 pyarrow>=17
-# verify_parity.py:
-pydantic>=2
+msgspec>=0.18
+# verify_parity.py needs only msgspec + pyarrow from the above.
