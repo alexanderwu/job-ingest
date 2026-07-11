@@ -38,14 +38,16 @@ data/raw/json/*.json.gz
         │    fs::read → flate2(zlib-rs) gunzip → serde_json parse into
         │    typed structs (= validation) → flatten to 33 columns
         ├─→ SQLite  jobs.sqlite   (rusqlite, INSERT OR REPLACE, one tx)
-        ├─→ jobs.arrow            (Arrow IPC; full corpus or delta)
+        ├─→ jobs.arrow            (Arrow IPC handoff; full corpus or delta)
         ├─→ jobs.parquet          (--parquet, zstd; full runs only)
         ▼
 jobs.arrow  (+ stats JSON on stdout)
         │  ingest_and_benchmark.py (uv run, PEP 723 deps)
         ├─→ DuckDB  jobs.duckdb   (register Arrow table → INSERT OR REPLACE)
-        └─→ jobs.parquet          (--parquet on incremental runs: DuckDB
-                                   COPY of the full table, zstd)
+        ├─→ jobs.parquet          (--parquet on incremental runs: DuckDB
+        │                          COPY of the full table, zstd)
+        └─→ jobs.arrow is deleted once loaded -- it's a transient
+             handoff file, not a durable output
 ```
 
 Both databases key on `requisition_id` and are fed with `INSERT OR
@@ -105,7 +107,9 @@ uv run ingest_and_benchmark.py --parquet
 uv run ingest_and_benchmark.py --limit 2000
 
 # Parity spot-check against the Pydantic reference (exit 1 on any mismatch).
-# Needs a full-run jobs.arrow (incremental runs write only the delta):
+# ingest_and_benchmark.py deletes jobs.arrow once it's loaded, so generate
+# a fresh full-run one by invoking the Rust binary directly first:
+fastingest/target/release/fastingest data/raw/json data/processed --full
 uv run verify_parity.py --n 500
 ```
 

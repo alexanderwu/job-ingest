@@ -12,7 +12,9 @@ the Rust sidecar in fastingest/ (a serde mirror of job_schema.py; see
 verify_parity.py for the equivalence check). It keeps a manifest of file
 mtimes/sizes so repeat runs only parse new/changed files, upserts those rows
 straight into SQLite (rusqlite, no Arrow round-trip), and emits the same
-rows as an Arrow IPC file, which this script upserts into DuckDB.
+rows as an Arrow IPC file (<out-dir>/jobs.arrow), which this script reads,
+upserts into DuckDB, and then deletes -- it's just the handoff format
+between the two processes, not a durable output.
 
 A full rebuild happens with --full, or automatically on the first run (or
 whenever the manifest, SQLite, or DuckDB file is missing). Deleted input
@@ -25,7 +27,6 @@ Usage:
         [--limit 2000] [--full] [--parquet]
 
 Outputs:
-    <out-dir>/jobs.arrow             rows parsed this run (delta or full)
     <out-dir>/jobs.duckdb
     <out-dir>/jobs.sqlite
     <out-dir>/ingest_manifest.json   change-detection state (Rust-owned)
@@ -161,8 +162,13 @@ def run_fastingest(
 
     proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
     stats = json.loads(proc.stdout.strip().splitlines()[-1])
-    with pa.ipc.open_file(out_dir / "jobs.arrow") as reader:
+    arrow_path = out_dir / "jobs.arrow"
+    # Read via a plain file handle (not pa.ipc.open_file's default mmap) so
+    # no memory mapping outlives this call -- on Windows a lingering mmap
+    # would block the unlink() below even after the reader is closed.
+    with open(arrow_path, "rb") as f, pa.ipc.open_file(f) as reader:
         table = reader.read_all()
+    arrow_path.unlink()
 
     for sample in stats.get("error_samples", []):
         print(f"    error: {sample}", flush=True)
