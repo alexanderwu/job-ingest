@@ -15,6 +15,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 chrono = { version = "0.4", features = ["serde"] }
 arrow = "56"
+rusqlite = { version = "0.37", features = ["bundled"] }
+parquet = { version = "56", default-features = false, features = ["arrow", "zstd"] }
 
 [profile.release]
 lto = "thin"

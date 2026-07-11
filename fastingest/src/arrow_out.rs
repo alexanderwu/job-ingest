@@ -1,6 +1,6 @@
 //! Build a 33-column RecordBatch from the flattened rows and write it as an
-//! Arrow IPC (Feather v2) file. Field names/order must match `COLUMNS` in
-//! `ingest_and_benchmark.py`.
+//! Arrow IPC (Feather v2) file, and optionally as Parquet. Field names/order
+//! must match `COLUMNS` in `ingest_and_benchmark.py`.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -15,7 +15,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::flatten::FlatRow;
 
-pub fn write_ipc(rows: &[FlatRow], out: &Path) -> Result<(), ArrowError> {
+pub fn build_batch(rows: &[FlatRow]) -> Result<RecordBatch, ArrowError> {
     let mut id = StringBuilder::new();
     let mut source = StringBuilder::new();
     let mut board_token = StringBuilder::new();
@@ -158,9 +158,27 @@ pub fn write_ipc(rows: &[FlatRow], out: &Path) -> Result<(), ArrowError> {
         Arc::new(enriched_company_data_json.finish()),
     ];
 
-    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+    RecordBatch::try_new(schema, arrays)
+}
+
+pub fn write_ipc(batch: &RecordBatch, out: &Path) -> Result<(), ArrowError> {
     let file = File::create(out).map_err(ArrowError::from)?;
-    let mut writer = FileWriter::try_new(BufWriter::new(file), &schema)?;
-    writer.write(&batch)?;
+    let mut writer = FileWriter::try_new(BufWriter::new(file), batch.schema_ref())?;
+    writer.write(batch)?;
     writer.finish()
+}
+
+pub fn write_parquet(batch: &RecordBatch, out: &Path) -> Result<(), parquet::errors::ParquetError> {
+    use parquet::arrow::ArrowWriter;
+    use parquet::basic::{Compression, ZstdLevel};
+    use parquet::file::properties::WriterProperties;
+
+    let props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .build();
+    let file = File::create(out)?;
+    let mut writer = ArrowWriter::try_new(BufWriter::new(file), batch.schema(), Some(props))?;
+    writer.write(batch)?;
+    writer.close()?;
+    Ok(())
 }

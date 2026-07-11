@@ -1,42 +1,59 @@
 # job-ingest — fast job-listing ingest benchmark
 
-Ingests ~16k gzipped JSON job listings (`cache/json/*.json.gz`, ~101 MB
+Ingests ~16k gzipped JSON job listings (`data/raw/json/*.json.gz`, ~101 MB
 compressed / ~200+ MB raw) into **SQLite** and **DuckDB**, with full schema
-validation, and benchmarks the two backends.
+validation, and benchmarks the two backends. Ingest is **incremental**:
+repeat runs parse and upsert only new/changed files.
 
 The parse+validate phase originally ran single-threaded in Python
 (stdlib `json` + Pydantic v2) and took **~53 s**. It is now done by a Rust
-sidecar and takes **~0.6 s** — an **~84x speedup** — putting the entire
-pipeline (parse → validate → flatten → load both DBs) at **~2.4 s**.
+sidecar and takes **~0.6 s** — an **~84x speedup** — putting a full rebuild
+(parse → validate → flatten → load both DBs) at **~2.5 s**, and a no-change
+incremental run at **~0.1 s**.
 
 ## Benchmark (16,076 files, 0 validation errors)
 
 | stage                     | before  | after      |
 |---------------------------|---------|------------|
-| parse + validate          | ~53 s   | **0.63 s** |
-| SQLite insert             | ~1.4 s  | 1.35 s     |
-| DuckDB insert             | ~1.3 s  | **0.42 s** |
-| DuckDB total (parse+load) | ~54 s   | **1.05 s** |
+| parse + validate          | ~53 s   | **0.67 s** |
+| SQLite insert             | ~1.4 s  | 1.20 s     |
+| DuckDB insert             | ~1.3 s  | **0.57 s** |
+| DuckDB total (parse+load) | ~54 s   | **1.2 s**  |
+| incremental, no changes   | (n/a)   | **~0.1 s** |
 
-Notes: the 0.63 s includes process spawn and reading the Arrow file back into
+Notes: the 0.67 s includes process spawn and reading the Arrow file back into
 Python; the Rust binary alone parses everything in ~0.5 s warm. The very
 first run after a reboot pays Windows file-cache/Defender overhead on 16k
 small file opens (~5 s). DuckDB's insert dropped ~3x because it now
-bulk-ingests a columnar Arrow table instead of row-wise `executemany`.
+bulk-ingests a columnar Arrow table instead of row-wise `executemany`; the
+SQLite insert now happens inside the Rust sidecar via rusqlite (no Arrow
+round-trip or Python tuple materialization).
 
 ## Architecture
 
 ```
-cache/json/*.json.gz
-        │  fastingest (Rust): rayon-parallel per file —
+data/raw/json/*.json.gz
+        │  fastingest (Rust): stat all files, skip those unchanged per
+        │    ingest_manifest.json; for the rest, rayon-parallel per file —
         │    fs::read → flate2(zlib-rs) gunzip → serde_json parse into
         │    typed structs (= validation) → flatten to 33 columns
+        ├─→ SQLite  jobs.sqlite   (rusqlite, INSERT OR REPLACE, one tx)
+        ├─→ jobs.arrow            (Arrow IPC; full corpus or delta)
+        ├─→ jobs.parquet          (--parquet, zstd; full runs only)
         ▼
-db/jobs.arrow  (Arrow IPC, 33 cols; stats JSON on stdout)
+jobs.arrow  (+ stats JSON on stdout)
         │  ingest_and_benchmark.py (uv run, PEP 723 deps)
-        ├─→ SQLite  db/jobs.sqlite   (executemany, WAL, one transaction)
-        └─→ DuckDB  db/jobs.duckdb   (register Arrow table → INSERT..SELECT)
+        ├─→ DuckDB  jobs.duckdb   (register Arrow table → INSERT OR REPLACE)
+        └─→ jobs.parquet          (--parquet on incremental runs: DuckDB
+                                   COPY of the full table, zstd)
 ```
+
+Both databases key on `requisition_id` and are fed with `INSERT OR
+REPLACE`, so incremental runs are idempotent upserts. A full rebuild
+happens with `--full`, or automatically whenever the manifest or either
+database file is missing (the Arrow delta alone couldn't rebuild a lost
+DB). Deleted input files are ignored: their rows linger until the next
+full run.
 
 ### Files
 
@@ -49,13 +66,20 @@ db/jobs.arrow  (Arrow IPC, 33 cols; stats JSON on stdout)
     normalization, and RFC 3339 datetime validation via chrono.
   - `src/flatten.rs`: mirror of the original Python `flatten()` — 33-column
     row with 3 nested-JSON text blobs re-serialized from the typed structs.
-  - `src/arrow_out.rs`: column builders → one RecordBatch → Arrow IPC file.
-  - `src/main.rs`: arg parsing, rayon pipeline, per-file error
-    count-and-continue (exit 0, samples reported in the stats JSON).
-- **`ingest_and_benchmark.py`** — same CLI/benchmark output as before, but
-  the parse phase subprocesses the binary (auto-rebuilds via cargo when
-  sources are newer than the exe). SQLite is fed row tuples; DuckDB
-  bulk-ingests the registered pyarrow Table.
+  - `src/arrow_out.rs`: column builders → one RecordBatch → Arrow IPC file,
+    plus an optional Parquet writer (zstd).
+  - `src/sqlite_out.rs`: rusqlite (bundled) upsert — full rebuild or
+    incremental `INSERT OR REPLACE` in one transaction.
+  - `src/manifest.rs`: `ingest_manifest.json` — file → (mtime, size,
+    requisition_id) at last successful parse; drives change detection.
+    Files that fail validation are not recorded, so they retry every run.
+  - `src/main.rs`: arg parsing (`--limit/--full/--parquet`), change
+    detection, rayon pipeline, per-file error count-and-continue (exit 0,
+    samples reported in the stats JSON).
+- **`ingest_and_benchmark.py`** — subprocesses the binary (auto-rebuilds via
+  cargo when sources are newer than the exe), decides full-vs-incremental,
+  upserts the Arrow (delta) table into DuckDB, and handles the incremental
+  `--parquet` export.
 - **`verify_parity.py`** — samples N random files, runs the *original*
   gzip → json → Pydantic → `flatten()` path, and compares all 33 values per
   row against the Arrow output. JSON/datetime columns are compared at the
@@ -67,19 +91,28 @@ db/jobs.arrow  (Arrow IPC, 33 cols; stats JSON on stdout)
 ## Usage
 
 ```powershell
-# Full run (builds the Rust binary automatically if needed):
-uv run ingest_and_benchmark.py --out-dir db
+# Incremental run (first run is automatically a full rebuild; builds the
+# Rust binary if needed). Defaults: --json-dir data/raw/json --out-dir data/processed
+uv run ingest_and_benchmark.py
+
+# Force a full rebuild:
+uv run ingest_and_benchmark.py --full
+
+# Also emit data/processed/jobs.parquet (full corpus, zstd):
+uv run ingest_and_benchmark.py --parquet
 
 # Quick run on a subset:
-uv run ingest_and_benchmark.py --out-dir db --limit 2000
+uv run ingest_and_benchmark.py --limit 2000
 
-# Parity spot-check against the Pydantic reference (exit 1 on any mismatch):
+# Parity spot-check against the Pydantic reference (exit 1 on any mismatch).
+# Needs a full-run jobs.arrow (incremental runs write only the delta):
 uv run verify_parity.py --n 500
 ```
 
-Requirements: Rust toolchain (MSVC on Windows) and `uv` (scripts declare
-their Python deps inline via PEP 723). `requirements.txt` exists for
-non-uv users: `duckdb`, `pyarrow`, `pydantic`.
+Requirements: Rust toolchain (MSVC on Windows; rusqlite's bundled SQLite
+needs a C compiler, which MSVC provides) and `uv` (scripts declare their
+Python deps inline via PEP 723). `requirements.txt` exists for non-uv
+users: `duckdb`, `pyarrow`, `pydantic`.
 
 ## Trade-offs vs alternatives considered
 
@@ -128,20 +161,19 @@ would populate the two databases from different code paths.
 1. **CI guard for schema drift**: run `cargo build` + `verify_parity.py
    --n 200` (on a small fixture set) whenever `job_schema.py` or
    `schema.rs` changes, so the two schemas can't silently diverge.
-2. **Incremental ingest**: the loader rebuilds both DBs from scratch each
-   run. If this becomes a recurring job, track file mtimes/hashes and
-   upsert only new/changed listings (`INSERT OR REPLACE` /
-   `INSERT ... ON CONFLICT`).
-3. **Skip the Arrow round-trip for SQLite** if its 1.35 s ever matters:
-   have fastingest write the SQLite file directly (`rusqlite`), or batch
-   rows into SQLite from Arrow record batches without materializing all
-   16k Python tuples.
-4. **Emit Parquet alongside Arrow IPC** (one extra dependency in the
-   crate): makes the validated corpus directly queryable by DuckDB, Polars,
-   pandas, Spark, etc. without either database.
-5. **Structured error report**: on validation failures, write a
+2. **Structured error report**: on validation failures, write a
    `errors.jsonl` (file, JSON pointer, message) instead of just 10 samples
    on stdout — useful once the corpus stops being perfectly clean.
-6. **If the corpus grows ~100x**: chunk the Arrow output into multiple
+3. **If the corpus grows ~100x**: chunk the Arrow output into multiple
    record batches (bounded memory) and consider `LargeUtf8` for the
    description column.
+4. **Deletion handling** (currently ignored by choice): the manifest
+   already knows each file's requisition_id, so detecting vanished files
+   and deleting their rows is a small addition if the input dir ever
+   starts shrinking.
+
+Done (were steps 2–4): incremental ingest via `ingest_manifest.json`
+(mtime+size, `INSERT OR REPLACE` upserts, auto full rebuild when outputs
+are missing); direct SQLite writes from the Rust sidecar via rusqlite; and
+`--parquet` output (Rust-written on full runs, DuckDB `COPY` on
+incremental ones).

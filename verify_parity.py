@@ -11,8 +11,13 @@ Byte-exact equality is NOT expected for JSON-text and datetime columns
 (whitespace, fractional-second padding, "+00:00" vs "Z"); those are compared
 at the value level. Everything else must match exactly.
 
+The Arrow file must come from a FULL run (`ingest_and_benchmark.py --full`,
+or any first run): incremental runs write only the delta rows, so sampled
+files would be reported as missing.
+
 Usage:
-    uv run verify_parity.py --json-dir cache/json --arrow db/jobs.arrow --n 500
+    uv run verify_parity.py --json-dir data/raw/json \
+        --arrow data/processed/jobs.arrow --n 500
 """
 
 from __future__ import annotations
@@ -142,8 +147,8 @@ def compare_value(col: str, py_val, rs_val) -> str | None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--json-dir", type=Path, default=Path("cache/json"))
-    parser.add_argument("--arrow", type=Path, default=Path("db/jobs.arrow"))
+    parser.add_argument("--json-dir", type=Path, default=Path("data/raw/json"))
+    parser.add_argument("--arrow", type=Path, default=Path("data/processed/jobs.arrow"))
     parser.add_argument("--n", type=int, default=200)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
@@ -155,6 +160,12 @@ def main() -> None:
     print(f"Arrow table: {table.num_rows} rows")
 
     files = sorted(args.json_dir.glob("*.json.gz"))
+    if table.num_rows < len(files) // 2:
+        sys.exit(
+            f"Arrow table has {table.num_rows} rows but {args.json_dir} has "
+            f"{len(files)} files — looks like a delta from an incremental "
+            f"run. Re-run `ingest_and_benchmark.py --full` first."
+        )
     rng = random.Random(args.seed)
     sample = rng.sample(files, min(args.n, len(files)))
 
@@ -174,7 +185,11 @@ def main() -> None:
         rid = py_row[COLUMNS.index("requisition_id")]
         if rid not in index:
             mismatch_counts["<missing row>"] = mismatch_counts.get("<missing row>", 0) + 1
-            first_diffs.append(f"{path.name}: requisition_id {rid!r} not in Arrow table")
+            if len(first_diffs) < 10:
+                first_diffs.append(
+                    f"{path.name}: requisition_id {rid!r} not in Arrow table "
+                    f"(delta from an incremental run? re-run with --full)"
+                )
             continue
         i = index[rid]
         for col, py_val in zip(COLUMNS, py_row):
