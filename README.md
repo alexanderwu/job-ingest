@@ -1,213 +1,199 @@
-# job-ingest — fast job-listing ingest benchmark
+# job-ingest — a fast, local job recommendation engine
 
-Ingests ~16k gzipped JSON job listings (`data/raw/json/*.json.gz`, ~101 MB
-compressed / ~200+ MB raw) into **SQLite** and **DuckDB**, with full schema
-validation, and benchmarks the two backends. Ingest is **incremental**:
-repeat runs parse and upsert only new/changed files.
+A personal, local-first pipeline that turns a scraped corpus of ~16k job
+listings into a queryable recommendation engine: validate and load the
+raw JSON in about a second, index it for keyword + semantic search, and
+ask it things — from a CLI, a local web API, or a notebook. No servers
+to run, no cloud dependencies: everything lives in two database files on
+disk, and every stage is benchmarked.
 
-The parse+validate phase originally ran single-threaded in Python
-(stdlib `json` + Pydantic v2) and took **~53 s**. There are now two
-interchangeable engines, selected with `--engine`:
+## Goals & vision
 
-- **msgspec (default)** — the schema as `msgspec.Struct`s in
-  `job_schema.py`; decode+validate in one C pass, in-process, pure-Python
-  packaging. **~2.8 s** for the full corpus single-threaded, **~1.3 s**
-  with `--workers 8`.
-- **rust** — the fastingest serde sidecar: **~0.67 s**, but needs a Rust
-  toolchain.
-
-Both keep the same `ingest_manifest.json`, so you can switch engines
-between runs; a no-change incremental run is **~0.1–0.3 s** either way.
-
-## Benchmark (16,076 files, 0 validation errors)
-
-| stage                     | Pydantic (before) | msgspec (default)     | Rust (`--engine rust`) |
-|---------------------------|---------|--------------------------------|------------|
-| parse + validate          | ~53 s   | 2.8 s (1.25 s, 8 workers)      | **0.67 s** |
-| SQLite insert             | ~1.4 s  | 1.04 s                         | 1.20 s     |
-| DuckDB insert             | ~1.3 s  | 0.58 s                         | **0.57 s** |
-| DuckDB total (parse+load) | ~54 s   | 3.4 s                          | **1.2 s**  |
-| incremental, no changes   | (n/a)   | ~0.3 s                         | **~0.1 s** |
-
-Notes: the Rust 0.67 s includes process spawn and reading the Arrow file
-back into Python; the binary alone parses everything in ~0.5 s warm. The
-very first run after a reboot pays Windows file-cache/Defender overhead on
-16k small file opens (~5 s). DuckDB's insert dropped ~3x vs the original
-because it bulk-ingests a columnar Arrow table instead of row-wise
-`executemany`; the SQLite insert happens inside whichever engine parsed
-(rusqlite in the sidecar, stdlib `sqlite3` `executemany` in the msgspec
-engine — same DDL, pragmas, and single transaction).
-
-## Architecture
+1. **Fast enough to never think about.** The original parse+validate
+   took ~53 s; it now takes ~1–3 s (msgspec) or ~0.7 s (Rust sidecar),
+   and incremental re-runs are ~0.1–0.3 s. The recommendation layer
+   keeps that ethos: every query type answers in single-digit to
+   low-double-digit milliseconds at 16k–100k rows.
+2. **Local-first, file-based.** SQLite serves the recommendation engine;
+   DuckDB and Parquet serve notebook analytics. A web app, the CLI, an
+   ingest run, and a notebook can all touch the data at the same time
+   (SQLite WAL: n readers + 1 writer) without anyone starting a server.
+3. **Validated data, one schema.** Every record passes typed,
+   per-field validation (`job_schema.py` msgspec Structs, mirrored by
+   the optional Rust engine, with a parity checker so they can't drift).
+4. **Recommendations that use both signals.** Hybrid retrieval — BM25
+   keyword search (FTS5) fused with semantic embeddings (sqlite-vec) via
+   Reciprocal Rank Fusion — because lexical-only misses paraphrases and
+   embedding-only misses exact constraints ("RN license", "TS/SCI").
+5. **Everything measured.** Benchmarks are part of the repo
+   (`ingest_and_benchmark.py`, `benchmark_rec.py`, `eval_rec.py`), so
+   design decisions are backed by numbers, not vibes.
 
 ```
-data/raw/json/*.json.gz
-        │  engine (--engine, default msgspec): stat all files, skip those
-        │  unchanged per ingest_manifest.json; parse+validate+flatten the
-        │  rest to 33-column rows —
-        │    msgspec: in-process Python, gzip → msgspec Struct decode
-        │      (job_schema.py); --workers N fans out over a process pool
-        │    rust:    fastingest sidecar, rayon-parallel fs::read →
-        │      flate2(zlib-rs) gunzip → serde_json into typed structs;
-        │      hands its rows back as jobs.arrow (Arrow IPC, transient —
-        │      deleted once loaded; the msgspec engine needs no handoff
-        │      file, its Arrow table stays in-process)
-        ├─→ SQLite  jobs.sqlite   (INSERT OR REPLACE, one tx; rusqlite or
-        │                          stdlib sqlite3 — same DDL and pragmas)
-        ├─→ jobs.parquet          (--parquet, zstd; full runs only)
+data/raw/json/*.json.gz                          (the scraped corpus)
+        │ ingest_and_benchmark.py    incremental parse+validate+load
+        ├─→ data/processed/jobs.sqlite           serving store
+        ├─→ data/processed/jobs.duckdb           analytics store
+        └─→ data/processed/jobs.parquet          (--parquet)
+        │ recindex.py                incremental FTS5 + embedding index
         ▼
-Arrow table of this run's rows
-        │  ingest_and_benchmark.py (uv run, PEP 723 deps)
-        ├─→ DuckDB  jobs.duckdb   (register Arrow table → INSERT OR REPLACE)
-        └─→ jobs.parquet          (--parquet on incremental runs: DuckDB
-                                   COPY of the full table, zstd)
+recommend.py  ──  filter | search | similar | resume   (RRF hybrid)
+        ├─ CLI:       uv run recommend.py ...
+        ├─ Web API:   uv run uvicorn api:app        (api.py, FastAPI)
+        └─ Notebook:  examples/analytics.ipynb
 ```
 
-Both databases key on `requisition_id` and are fed with `INSERT OR
-REPLACE`, so incremental runs are idempotent upserts. A full rebuild
-happens with `--full`, or automatically whenever the manifest or either
-database file is missing (the Arrow delta alone couldn't rebuild a lost
-DB). Deleted input files are ignored: their rows linger until the next
-full run.
+## Getting started
 
-### Files
+Install [uv](https://docs.astral.sh/uv/) — it's the only prerequisite;
+it fetches the right Python and all dependencies automatically:
 
-- **`fastingest/`** — Rust crate.
-  - `src/schema.rs`: serde mirror of `job_schema.py`, field-for-field and in
-    the same order (so the JSON blob columns round-trip with identical key
-    order). Handles the field aliases (`401k_matching`,
-    `bi-weekly_*_compensation`, `_geoloc`, `__N_SSG`, camelCase user-activity
-    arrays), `str | int` unions (untagged enum), `null → []` list
-    normalization, and RFC 3339 datetime validation via chrono.
-  - `src/flatten.rs`: mirror of the original Python `flatten()` — 33-column
-    row with 3 nested-JSON text blobs re-serialized from the typed structs.
-  - `src/arrow_out.rs`: column builders → one RecordBatch → Arrow IPC file,
-    plus an optional Parquet writer (zstd).
-  - `src/sqlite_out.rs`: rusqlite (bundled) upsert — full rebuild or
-    incremental `INSERT OR REPLACE` in one transaction.
-  - `src/manifest.rs`: `ingest_manifest.json` — file → (mtime, size,
-    requisition_id) at last successful parse; drives change detection.
-    Files that fail validation are not recorded, so they retry every run.
-  - `src/main.rs`: arg parsing (`--limit/--full/--parquet`), change
-    detection, rayon pipeline, per-file error count-and-continue (exit 0,
-    samples reported in the stats JSON).
-- **`ingest_and_benchmark.py`** — decides full-vs-incremental, runs the
-  selected engine, upserts the (delta) Arrow table into DuckDB, and handles
-  the incremental `--parquet` export. Houses the msgspec engine (manifest
-  handling, process-pool parsing, sqlite3 upsert); for `--engine rust` it
-  subprocesses the binary (auto-rebuilding via cargo when sources are newer
-  than the exe).
-- **`verify_parity.py`** — samples N random files, runs the msgspec path
-  (`decode_page` + `flatten` imported from `job_schema.py`), and compares
-  all 33 values per row against the Rust Arrow output. JSON/datetime
-  columns are compared at the value level (whitespace and `Z` vs `+00:00`
-  formatting are not meaningful); everything else must match exactly, and
-  blob key order is asserted.
-- **`job_schema.py`** — the schema as `msgspec.Struct`s (converted from the
-  original Pydantic v2 models, same classes/fields/order); the Python
-  source of truth. Also home of the shared 33-column `COLUMNS` order and
-  `flatten()`, used by both the msgspec engine and the parity checker.
+```bash
+uv sync                      # create .venv from pyproject.toml + uv.lock
+```
 
-## Usage
+Then, with your corpus in `data/raw/json/*.json.gz`:
 
-```powershell
-# Incremental run with the default msgspec engine (first run is
-# automatically a full rebuild).
-# Defaults: --json-dir data/raw/json --out-dir data/processed
+```bash
+# 1. Ingest (incremental; first run is a full build). ~2.8s for 16k
+#    files single-threaded, ~1.3s with --workers 8.
 uv run ingest_and_benchmark.py
 
-# Parallelize the msgspec parse over 8 processes:
-uv run ingest_and_benchmark.py --workers 8
+# 2. Build the search indexes (incremental too). Downloads the default
+#    embedding model (potion-base-8M, ~30 MB, no torch) on first use.
+uv run recindex.py
 
-# Use the Rust sidecar instead (builds the binary if needed):
-uv run ingest_and_benchmark.py --engine rust
+# 3. Ask it things.
+uv run recommend.py filter --category "Software Engineering" \
+    --workplace Remote --min-comp 150000
+uv run recommend.py search "staff platform engineer kubernetes"
+uv run recommend.py similar <requisition_id>
+uv run recommend.py resume my_resume.md -k 20
 
-# Force a full rebuild:
-uv run ingest_and_benchmark.py --full
-
-# Also emit data/processed/jobs.parquet (full corpus, zstd):
-uv run ingest_and_benchmark.py --parquet
-
-# Quick run on a subset:
-uv run ingest_and_benchmark.py --limit 2000
-
-# Rust-vs-msgspec parity spot-check (exit 1 on any mismatch).
-# ingest_and_benchmark.py deletes jobs.arrow once it's loaded, so generate
-# a fresh full-run one by invoking the Rust binary directly first:
-fastingest/target/release/fastingest data/raw/json data/processed --full
-uv run verify_parity.py --n 500
+# Or serve it to a local web app:
+uv sync --extra api && uv run uvicorn api:app
+# GET /jobs, GET /search?q=, GET /similar/{id}, POST /resume
 ```
 
-Requirements: `uv` (scripts declare their Python deps inline via PEP 723;
-`requirements.txt` exists for non-uv users: `duckdb`, `pyarrow`,
-`msgspec`). A Rust toolchain (MSVC on Windows; rusqlite's bundled SQLite
-needs a C compiler, which MSVC provides) is only needed for
-`--engine rust`.
+**No corpus handy?** Generate a synthetic one and take the whole
+pipeline for a spin:
 
-## Trade-offs vs alternatives considered
+```bash
+uv run make_fixtures.py --out data/raw/json --n 2000
+uv run ingest_and_benchmark.py && uv run recindex.py
+```
 
-Both of the top two options are now implemented, as the two `--engine`s:
+Development:
 
-**msgspec Structs (now the default engine)** — the schema ported to
-`msgspec.Struct`; decode+validate in one C pass, ~19x faster than
-json+Pydantic single-threaded and ~2.3x more with `--workers 8`, pure
-Python packaging, no toolchain. `job_schema.py` stays the single Python
-source of truth (the old Pydantic module was converted, not duplicated).
+```bash
+uv run pytest                          # end-to-end tests (offline)
+uv run benchmark_rec.py --synthetic 16000 --model hash   # rec benchmarks
+uv run eval_rec.py --synthetic 2000    # retrieval-quality eval
+```
 
-**Rust serde sidecar (`--engine rust`)** — fastest option that still does
-real, typed, per-field validation; the struct definitions *are* the
-schema, so malformed files fail loudly. Cost: a second language in the
-repo, a toolchain dependency, and the schema exists twice
-(`job_schema.py` + `schema.rs`) — any schema change must be made in both
-places, with `verify_parity.py` as the safety net.
+`--model hash` is a deterministic, network-free embedder for tests and
+benchmarks; use the default (`potion`) or `--model minilm`
+(`uv sync --extra minilm`, pulls torch) for real quality — and
+`eval_rec.py` to compare them on your data.
 
-**Keep Pydantic, add orjson + ProcessPoolExecutor** — least churn, one
-schema. But Pydantic validation itself is the bottleneck (not just
-parsing), so this caps out around ~6–10 s on typical core counts, and
-Windows process-spawn overhead eats into it.
+## Repo layout
 
-**DuckDB native `read_json('*.json.gz')`** — DuckDB's C++ engine can
-parallel-gunzip and parse the files directly; likely the fastest possible
-DuckDB load. Rejected because it bypasses schema validation entirely and
-would populate the two databases from different code paths.
+| Path | What it is |
+|---|---|
+| `job_schema.py` | The schema (msgspec Structs), 33-column flatten — Python source of truth |
+| `ingest_and_benchmark.py` | Incremental ingest → SQLite + DuckDB (+ Parquet), with benchmark |
+| `fastingest/` | Optional Rust engine (`--engine rust`), ~4x faster parse |
+| `verify_parity.py` | Asserts Rust and Python engines produce identical rows |
+| `recindex.py` | Builds FTS5 + embedding indexes inside jobs.sqlite, incrementally |
+| `recommend.py` | Query layer: filter / search / similar / resume + CLI |
+| `embedders.py` | Embedding backends: model2vec (default), MiniLM, hash |
+| `api.py` | FastAPI app over the same query layer |
+| `make_fixtures.py` | Synthetic, schema-conformant corpus generator |
+| `benchmark_rec.py`, `eval_rec.py` | Rec-engine latency benchmarks and quality eval |
+| `tests/` | End-to-end pytest suite (runs fully offline) |
+| `PLAN.md` | The SQLite-vs-DuckDB decision document for the rec engine |
+| `docs/ingest.md` | Ingest layer deep-dive (engines, benchmarks, gotchas) |
+| `examples/analytics.ipynb` | Notebook: DuckDB analytics + rec queries |
 
-**Gotchas that actually bit (or would have):**
-- serde_json's default float parser is fast but can be **1 ULP off**; this
-  produced real mismatches (e.g. `105.76923076923077` → `...076`). Fixed
-  with the `float_roundtrip` feature — cost is negligible at this scale.
-- Blob columns are **value-equal, not byte-equal**, across engines:
-  chrono and msgspec print datetimes with different fractional-second
-  padding / `Z` vs `+00:00`. The parity checker normalizes these; anything
-  consuming the blobs should parse them as JSON rather than compare strings.
-- Rust field order and `#[serde(rename)]` must exactly mirror the
-  `job_schema.py` classes or blob key order silently changes — the parity
-  checker asserts key order to catch this.
-- serde and msgspec are both stricter than Pydantic's lax mode (e.g. no
-  `"5"` → 5.0, no naive datetimes). This corpus is clean (0 errors all
-  ways); if future data trips it, add a targeted shim for that field only
-  (`deserialize_with` in Rust, a `__post_init__` fixup in Python).
-- msgspec `kw_only=True` is **not inherited** by fields declared on
-  subclasses of a configured base Struct — it must be repeated on every
-  class, or required-after-optional field orders raise at import.
+## Why these choices (vs alternatives)
 
-## Next steps
+**Why uv for environment management** — one tool replaces
+pip + venv + pyenv + pip-tools: it pins Python itself
+(`requires-python`), locks every dependency cross-platform (`uv.lock`,
+committed), and `uv run` re-syncs the environment automatically, so
+"clone → `uv run pytest`" just works, identically, on every machine.
+Poetry manages packages but not Python versions and resolves far more
+slowly; conda is heavyweight for a pure-wheel dependency set; plain
+`pip install -r requirements.txt` gives unrepeatable environments and
+no lockfile. (`requirements.txt` is still kept, mirroring pyproject, for
+non-uv users.)
 
-1. **CI guard for schema drift**: run `cargo build` + `verify_parity.py
-   --n 200` (on a small fixture set) whenever `job_schema.py` or
-   `schema.rs` changes, so the two schemas can't silently diverge.
-2. **Structured error report**: on validation failures, write a
-   `errors.jsonl` (file, JSON pointer, message) instead of just 10 samples
-   on stdout — useful once the corpus stops being perfectly clean.
-3. **If the corpus grows ~100x**: chunk the Arrow output into multiple
-   record batches (bounded memory) and consider `LargeUtf8` for the
-   description column.
-4. **Deletion handling** (currently ignored by choice): the manifest
-   already knows each file's requisition_id, so detecting vanished files
-   and deleting their rows is a small addition if the input dir ever
-   starts shrinking.
+**Why SQLite serves the rec engine (and DuckDB stays for analytics)** —
+the full head-to-head is [PLAN.md](PLAN.md); the short version: a
+recommendation engine is an OLTP-shaped workload (many small top-k
+queries, incremental updates, concurrent readers), which is SQLite home
+turf. FTS5 is mature and updates incrementally, while DuckDB's fts
+extension needs a full index rebuild after every ingest; sqlite-vec does
+exact k-NN with row-level maintenance, while DuckDB's HNSW persistence
+is experimental; and SQLite WAL lets the API, CLI, notebooks, and an
+ingest run coexist, while a read-write DuckDB process locks everyone
+else out. At ≤100k rows both are sub-millisecond at filtering, so the
+tiebreakers are maturity, incrementality, and concurrency — SQLite wins
+all three. DuckDB keeps doing what it's genuinely better at: columnar
+analytics over `jobs.duckdb`/`jobs.parquet`. If the corpus outgrows
+~1M rows, the schema ports directly to Postgres + pgvector.
 
-Done (were steps 2–4): incremental ingest via `ingest_manifest.json`
-(mtime+size, `INSERT OR REPLACE` upserts, auto full rebuild when outputs
-are missing); direct SQLite writes from the Rust sidecar via rusqlite; and
-`--parquet` output (Rust-written on full runs, DuckDB `COPY` on
-incremental ones).
+**Why exact k-NN, not a vector database** — at 16k–100k × 256-dim
+vectors, brute-force cosine takes single-digit milliseconds; an ANN
+index (or a Qdrant/Chroma/LanceDB sidecar) adds infrastructure,
+consistency headaches, and cross-system joins for zero perceptible
+speedup. Embeddings also live in a plain BLOB table, so the fallback
+(numpy in-process) and the migration path (pgvector) are both trivial.
+
+**Why hybrid BM25 + embeddings** — lexical-only reduces resume matching
+to keyword overlap; embedding-only is weak on exact skill/certification
+constraints. RRF fusion of both is the standard answer and both legs are
+cheap here. The default embedding model is static
+(`potion-base-8M` via model2vec: no torch, ~30 MB, embeds the whole
+corpus in seconds) with `all-MiniLM-L6-v2` behind a flag —
+`eval_rec.py` exists precisely to check what the quality flag buys.
+
+**Why msgspec (and optionally Rust) for ingest** — decode+validate in
+one C pass is ~19x faster than json+Pydantic; the serde sidecar is
+another ~4x. Full trade-offs, benchmark table, and the gotchas that
+actually bit: [docs/ingest.md](docs/ingest.md).
+
+## Performance
+
+Ingest (16,076 real files, from [docs/ingest.md](docs/ingest.md)):
+parse+validate 2.8 s msgspec / 0.67 s Rust (was ~53 s); no-change
+incremental run ~0.1–0.3 s.
+
+Recommendation layer (16k synthetic rows, `--model hash`, this repo's
+`benchmark_rec.py --synthetic 16000`; k=10, p50/p95 ms):
+
+| query type | p50 | p95 |
+|---|---:|---:|
+| filter (category + comp) | 2.6 | 7.0 |
+| keywords (FTS5/bm25) | 9.8 | 17.2 |
+| similar (k-NN, sqlite-vec) | 14.4 | 15.4 |
+| resume (hybrid, embedding included) | 39.3 | 56.4 |
+
+At the PLAN's 100k-row ceiling (`--synthetic 100000`) everything stays
+interactive: filter ~17 ms, keywords ~81 ms, similar ~87 ms, resume
+~249 ms p50 — and the synthetic corpus is a worst case for term
+selectivity (10 archetypes sharing vocabulary across 100k rows).
+
+Index build at 16k rows: FTS ~0.7 s + embeddings; a no-change
+incremental `recindex.py` run is ~0.1 s, and a 50-row delta ~0.2 s.
+Reproduce with `uv run benchmark_rec.py --synthetic 16000 --model hash
+--duckdb-appendix` (the appendix prints the DuckDB keyword/vector
+comparison behind PLAN.md).
+
+## Status & roadmap
+
+Implemented (PLAN.md phases 1–5): incremental index build, the four
+query types with RRF fusion, CLI + FastAPI + notebook interfaces,
+benchmarks, and the eval harness. Open questions tracked in PLAN.md:
+popularity priors from user-activity arrays, and persisting user state
+(saved searches/feedback) — which would land in SQLite too.

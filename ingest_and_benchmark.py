@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["duckdb>=1.0", "pyarrow>=17", "msgspec>=0.18"]
-# ///
 """
 Ingest *.json.gz job listings into DuckDB and SQLite, incrementally, and
 benchmark load performance across the two backends.

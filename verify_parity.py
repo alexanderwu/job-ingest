@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["msgspec>=0.18", "pyarrow>=17"]
-# ///
 """
 Verify that the Rust fastingest output (Arrow IPC) matches the Python path
 (gzip -> msgspec job_schema decode+validate -> flatten) value-for-value.

@@ -1,6 +1,12 @@
-# For non-uv users; both scripts also carry PEP 723 headers (`uv run <script>`).
-# ingest_and_benchmark.py:
+# For non-uv users. The project is managed with uv (pyproject.toml +
+# uv.lock are the source of truth); this file mirrors the core runtime
+# dependencies. Regenerate a fully pinned version with:
+#   uv export --no-dev --format requirements-txt
 duckdb>=1.0
 pyarrow>=17
 msgspec>=0.18
-# verify_parity.py needs only msgspec + pyarrow from the above.
+numpy>=1.26
+sqlite-vec>=0.1.6
+model2vec>=0.3
+# api.py additionally needs: fastapi>=0.110, uvicorn>=0.29
+# recindex --model minilm additionally needs: sentence-transformers>=3.0

@@ -1,0 +1,36 @@
+[project]
+name = "job-ingest"
+version = "0.1.0"
+description = "Fast local job-listing ingest + SQLite-backed recommendation engine"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # ingest
+    "duckdb>=1.0",
+    "pyarrow>=17",
+    "msgspec>=0.18",
+    # recommendation engine (recindex / recommend)
+    "numpy>=1.26",
+    "sqlite-vec>=0.1.6",
+    "model2vec>=0.3",
+]
+
+[project.optional-dependencies]
+# `uv sync --extra api` — the FastAPI serving layer (api.py)
+api = ["fastapi>=0.110", "uvicorn>=0.29"]
+# `uv sync --extra minilm` — higher-quality transformer embeddings
+# (recindex --model minilm); pulls in torch, so it is not a default.
+minilm = ["sentence-transformers>=3.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    # fastapi + httpx so tests can exercise api.py via TestClient
+    "fastapi>=0.110",
+    "httpx>=0.27",
+]
+
+[tool.uv]
+# Flat script repo, not an installable package: uv manages the venv/lock
+# but never tries to build or install the project itself.
+package = false
