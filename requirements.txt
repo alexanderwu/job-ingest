@@ -1,0 +1,6 @@
+# For non-uv users; both scripts also carry PEP 723 headers (`uv run <script>`).
+# ingest_and_benchmark.py:
+duckdb>=1.0
+pyarrow>=17
+# verify_parity.py:
+pydantic>=2

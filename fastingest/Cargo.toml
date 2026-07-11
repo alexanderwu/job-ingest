@@ -1,0 +1,21 @@
+[package]
+name = "fastingest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rayon = "1.10"
+# zlib-rs backend: pure Rust (no C toolchain needed on MSVC), noticeably
+# faster inflate than the default miniz_oxide.
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+serde = { version = "1", features = ["derive"] }
+# float_roundtrip: exact IEEE-754 float parsing (default fast path can be
+# 1 ULP off vs Python). Keep arbitrary_precision OFF — plain f64 matches
+# Python float semantics and blob output.
+serde_json = { version = "1", features = ["float_roundtrip"] }
+chrono = { version = "0.4", features = ["serde"] }
+arrow = "56"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
