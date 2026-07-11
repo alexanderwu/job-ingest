@@ -55,9 +55,16 @@ EMBED_DESC_CHARS = 5000
 # Fields read from `jobs` for indexing; the fingerprint covers all of
 # them, so any change re-does both the FTS row and the embedding.
 _FIELDS = (
-    "requisition_id", "title", "core_job_title", "description",
-    "technical_tools", "company_name", "job_category", "seniority_level",
-    "workplace_type", "formatted_workplace_location",
+    "requisition_id",
+    "title",
+    "core_job_title",
+    "description",
+    "technical_tools",
+    "company_name",
+    "job_category",
+    "seniority_level",
+    "workplace_type",
+    "formatted_workplace_location",
 )
 
 # Hot filter columns (PLAN §4). Text columns are indexed NOCASE to match
@@ -114,8 +121,12 @@ def _fingerprint(row: tuple) -> str:
 def embed_text(row: dict) -> str:
     """title + core fields + description, per PLAN 'Architecture'."""
     parts = [
-        row["title"], row["core_job_title"], row["company_name"],
-        row["job_category"], row["seniority_level"], row["workplace_type"],
+        row["title"],
+        row["core_job_title"],
+        row["company_name"],
+        row["job_category"],
+        row["seniority_level"],
+        row["workplace_type"],
         row["formatted_workplace_location"],
         _tools_text(row["technical_tools"]),
         (row["description"] or "")[:EMBED_DESC_CHARS],
@@ -130,8 +141,7 @@ def _get_meta(con: sqlite3.Connection) -> dict:
         return {}
 
 
-def _drop_jobs_vec(con: sqlite3.Connection,
-                   db_path: Path) -> sqlite3.Connection:
+def _drop_jobs_vec(con: sqlite3.Connection, db_path: Path) -> sqlite3.Connection:
     """Drop the vec0 table. DROP needs the vec0 module loaded; when
     sqlite-vec is unavailable (e.g. the index moved to a machine without
     it), excise the virtual-table schema entry instead (it owns no data
@@ -147,9 +157,13 @@ def _drop_jobs_vec(con: sqlite3.Connection,
         con.commit()
         con.close()
         con = sqlite3.connect(db_path)
-        shadows = [r[0] for r in con.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table' "
-            "AND name LIKE 'jobs_vec_%'")]
+        shadows = [
+            r[0]
+            for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name LIKE 'jobs_vec_%'"
+            )
+        ]
         for name in shadows:
             con.execute(f'DROP TABLE "{name}"')
         con.commit()
@@ -161,8 +175,7 @@ def _drop_index_tables(con: sqlite3.Connection) -> None:
         con.execute(f"DROP TABLE IF EXISTS {t}")
 
 
-def _create_index_tables(con: sqlite3.Connection, dim: int,
-                         have_vec: bool) -> None:
+def _create_index_tables(con: sqlite3.Connection, dim: int, have_vec: bool) -> None:
     con.execute("CREATE TABLE rec_meta (key TEXT PRIMARY KEY, value TEXT)")
     con.execute("""
         CREATE TABLE rec_rows (
@@ -208,20 +221,26 @@ def build_index(
     con.execute("PRAGMA journal_mode=WAL")
     have_vec = load_vec_extension(con)
     if not have_vec:
-        log("warning: sqlite-vec unavailable; skipping jobs_vec "
-            "(queries will brute-force via numpy)")
+        log(
+            "warning: sqlite-vec unavailable; skipping jobs_vec "
+            "(queries will brute-force via numpy)"
+        )
 
     t0 = time.perf_counter()
     embedder = embedders.get_embedder(model)
     load_sec = time.perf_counter() - t0
 
     meta = _get_meta(con)
-    if meta and (meta.get("schema_version") != SCHEMA_VERSION
-                 or meta.get("model") != embedder.name
-                 or int(meta.get("dim", -1)) != embedder.dim
-                 or (meta.get("vec0") == "1") != have_vec):
-        log(f"index config changed (model {meta.get('model')} -> "
-            f"{embedder.name}); rebuilding from scratch")
+    if meta and (
+        meta.get("schema_version") != SCHEMA_VERSION
+        or meta.get("model") != embedder.name
+        or int(meta.get("dim", -1)) != embedder.dim
+        or (meta.get("vec0") == "1") != have_vec
+    ):
+        log(
+            f"index config changed (model {meta.get('model')} -> "
+            f"{embedder.name}); rebuilding from scratch"
+        )
         full = True
     if full or not meta:
         con = _drop_jobs_vec(con, db_path)
@@ -232,16 +251,16 @@ def build_index(
         old_fp = {
             rid: (rowid, fp)
             for rowid, rid, fp in con.execute(
-                "SELECT id, requisition_id, fingerprint FROM rec_rows")
+                "SELECT id, requisition_id, fingerprint FROM rec_rows"
+            )
         }
 
     for name, col in BTREE_INDEXES.items():
         con.execute(f"CREATE INDEX IF NOT EXISTS {name} ON jobs({col})")
 
     t0 = time.perf_counter()
-    jobs = con.execute(
-        f"SELECT {', '.join(_FIELDS)} FROM jobs").fetchall()
-    changed: list[dict] = []   # rows to (re)index, with 'id' filled in later
+    jobs = con.execute(f"SELECT {', '.join(_FIELDS)} FROM jobs").fetchall()
+    changed: list[dict] = []  # rows to (re)index, with 'id' filled in later
     seen: set[str] = set()
     stale_ids: list[int] = []  # rec ids whose FTS/vec rows must be deleted
     n_new = n_changed = 0
@@ -260,8 +279,7 @@ def build_index(
             n_changed += 1
             stale_ids.append(old[0])
         changed.append(rec)
-    removed = [(rowid, rid) for rid, (rowid, _) in old_fp.items()
-               if rid not in seen]
+    removed = [(rowid, rid) for rid, (rowid, _) in old_fp.items() if rid not in seen]
     diff_sec = time.perf_counter() - t0
 
     t0 = time.perf_counter()
@@ -275,7 +293,7 @@ def build_index(
             if have_vec:
                 con.execute("DELETE FROM jobs_vec WHERE rowid = ?", (rowid,))
         for rec in changed:
-            cur = con.execute(
+            _cur = con.execute(
                 "INSERT INTO rec_rows (requisition_id, fingerprint) "
                 "VALUES (?, ?) ON CONFLICT(requisition_id) "
                 "DO UPDATE SET fingerprint = excluded.fingerprint",
@@ -289,34 +307,48 @@ def build_index(
             "INSERT INTO jobs_fts (rowid, title, core_job_title, "
             "description, technical_tools, company_name) "
             "VALUES (?, ?, ?, ?, ?, ?)",
-            [(r["id"], r["title"], r["core_job_title"], r["description"],
-              _tools_text(r["technical_tools"]), r["company_name"])
-             for r in changed],
+            [
+                (
+                    r["id"],
+                    r["title"],
+                    r["core_job_title"],
+                    r["description"],
+                    _tools_text(r["technical_tools"]),
+                    r["company_name"],
+                )
+                for r in changed
+            ],
         )
     fts_sec = time.perf_counter() - t0
 
     t0 = time.perf_counter()
     with con:
         for start in range(0, len(changed), batch_size):
-            batch = changed[start:start + batch_size]
+            batch = changed[start : start + batch_size]
             vecs = embedder.encode([embed_text(r) for r in batch])
             rows = [
-                (r["id"], r["requisition_id"],
-                 vecs[i].astype("float32").tobytes())
+                (r["id"], r["requisition_id"], vecs[i].astype("float32").tobytes())
                 for i, r in enumerate(batch)
             ]
             con.executemany(
                 "INSERT OR REPLACE INTO job_embeddings "
-                "(id, requisition_id, vec) VALUES (?, ?, ?)", rows)
+                "(id, requisition_id, vec) VALUES (?, ?, ?)",
+                rows,
+            )
             if have_vec:
                 con.executemany(
                     "INSERT INTO jobs_vec (rowid, embedding) VALUES (?, ?)",
-                    [(r[0], r[2]) for r in rows])
+                    [(r[0], r[2]) for r in rows],
+                )
         con.executemany(
             "INSERT OR REPLACE INTO rec_meta (key, value) VALUES (?, ?)",
-            [("schema_version", SCHEMA_VERSION), ("model", embedder.name),
-             ("dim", str(embedder.dim)), ("vec0", "1" if have_vec else "0"),
-             ("built_at", time.strftime("%Y-%m-%dT%H:%M:%S%z"))],
+            [
+                ("schema_version", SCHEMA_VERSION),
+                ("model", embedder.name),
+                ("dim", str(embedder.dim)),
+                ("vec0", "1" if have_vec else "0"),
+                ("built_at", time.strftime("%Y-%m-%dT%H:%M:%S%z")),
+            ],
         )
     embed_sec = time.perf_counter() - t0
     total = con.execute("SELECT COUNT(*) FROM rec_rows").fetchone()[0]
@@ -324,32 +356,45 @@ def build_index(
     con.close()
 
     stats = {
-        "rows": total, "new": n_new, "changed": n_changed,
-        "removed": len(removed), "model": embedder.name,
-        "dim": embedder.dim, "vec0": have_vec, "full": full or not meta,
-        "model_load_sec": load_sec, "diff_sec": diff_sec,
-        "fts_sec": fts_sec, "embed_sec": embed_sec,
+        "rows": total,
+        "new": n_new,
+        "changed": n_changed,
+        "removed": len(removed),
+        "model": embedder.name,
+        "dim": embedder.dim,
+        "vec0": have_vec,
+        "full": full or not meta,
+        "model_load_sec": load_sec,
+        "diff_sec": diff_sec,
+        "fts_sec": fts_sec,
+        "embed_sec": embed_sec,
     }
-    log(f"recindex: {total} rows indexed ({n_new} new, {n_changed} "
+    log(
+        f"recindex: {total} rows indexed ({n_new} new, {n_changed} "
         f"changed, {len(removed)} removed) — model {embedder.name} "
-        f"[{embedder.dim}d], vec0={'yes' if have_vec else 'no'}")
-    log(f"  model load {load_sec:.2f}s, diff {diff_sec:.2f}s, "
-        f"fts {fts_sec:.2f}s, embed+vec {embed_sec:.2f}s")
+        f"[{embedder.dim}d], vec0={'yes' if have_vec else 'no'}"
+    )
+    log(
+        f"  model load {load_sec:.2f}s, diff {diff_sec:.2f}s, "
+        f"fts {fts_sec:.2f}s, embed+vec {embed_sec:.2f}s"
+    )
     return stats
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", type=Path, default=DEFAULT_DB)
-    parser.add_argument("--model", default=embedders.DEFAULT_MODEL,
-                        help="potion (default) | minilm | hash | any "
-                             "model2vec-loadable HF id")
-    parser.add_argument("--full", action="store_true",
-                        help="Drop and rebuild all rec tables.")
+    parser.add_argument(
+        "--model",
+        default=embedders.DEFAULT_MODEL,
+        help="potion (default) | minilm | hash | any model2vec-loadable HF id",
+    )
+    parser.add_argument(
+        "--full", action="store_true", help="Drop and rebuild all rec tables."
+    )
     parser.add_argument("--batch-size", type=int, default=EMBED_BATCH)
     args = parser.parse_args()
-    build_index(args.db, model=args.model, full=args.full,
-                batch_size=args.batch_size)
+    build_index(args.db, model=args.model, full=args.full, batch_size=args.batch_size)
 
 
 if __name__ == "__main__":

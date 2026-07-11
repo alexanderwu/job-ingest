@@ -33,113 +33,135 @@ from job_schema import COLUMNS, decode_page, flatten  # noqa: E402
 # name -> (titles, category, tools, description sentences, comp lo-hi)
 ARCHETYPES: dict[str, dict] = {
     "backend": dict(
-        titles=["Backend Engineer", "Software Engineer, Backend",
-                "Platform Engineer", "API Engineer"],
+        titles=[
+            "Backend Engineer",
+            "Software Engineer, Backend",
+            "Platform Engineer",
+            "API Engineer",
+        ],
         category="Software Engineering",
-        tools=["Python", "PostgreSQL", "Docker", "Kubernetes", "Redis",
-               "AWS", "gRPC", "Terraform"],
-        desc=["Design and operate distributed backend services and REST "
-              "APIs.", "Own PostgreSQL schema design, query tuning and "
-              "migrations.", "Deploy microservices to Kubernetes with CI/CD "
-              "pipelines."],
+        tools=[
+            "Python",
+            "PostgreSQL",
+            "Docker",
+            "Kubernetes",
+            "Redis",
+            "AWS",
+            "gRPC",
+            "Terraform",
+        ],
+        desc=[
+            "Design and operate distributed backend services and REST APIs.",
+            "Own PostgreSQL schema design, query tuning and migrations.",
+            "Deploy microservices to Kubernetes with CI/CD pipelines.",
+        ],
         comp=(120_000, 210_000),
     ),
     "frontend": dict(
-        titles=["Frontend Engineer", "UI Engineer",
-                "Software Engineer, Web"],
+        titles=["Frontend Engineer", "UI Engineer", "Software Engineer, Web"],
         category="Software Engineering",
         tools=["TypeScript", "React", "Next.js", "CSS", "GraphQL", "Jest"],
-        desc=["Build accessible, responsive web interfaces in React and "
-              "TypeScript.", "Collaborate with design on component systems "
-              "and design tokens.", "Profile and optimize bundle size and "
-              "rendering performance."],
+        desc=[
+            "Build accessible, responsive web interfaces in React and TypeScript.",
+            "Collaborate with design on component systems and design tokens.",
+            "Profile and optimize bundle size and rendering performance.",
+        ],
         comp=(110_000, 190_000),
     ),
     "datasci": dict(
-        titles=["Data Scientist", "Senior Data Scientist",
-                "Machine Learning Scientist"],
+        titles=[
+            "Data Scientist",
+            "Senior Data Scientist",
+            "Machine Learning Scientist",
+        ],
         category="Data Science",
-        tools=["Python", "pandas", "scikit-learn", "SQL", "Airflow",
-               "Snowflake"],
-        desc=["Build statistical models and experiments to drive product "
-              "decisions.", "Design A/B tests and communicate findings to "
-              "stakeholders.", "Productionize models in partnership with "
-              "engineering."],
+        tools=["Python", "pandas", "scikit-learn", "SQL", "Airflow", "Snowflake"],
+        desc=[
+            "Build statistical models and experiments to drive product decisions.",
+            "Design A/B tests and communicate findings to stakeholders.",
+            "Productionize models in partnership with engineering.",
+        ],
         comp=(125_000, 200_000),
     ),
     "mleng": dict(
         titles=["Machine Learning Engineer", "ML Platform Engineer"],
         category="Data Science",
-        tools=["Python", "PyTorch", "Kubernetes", "MLflow", "Spark",
-               "AWS"],
-        desc=["Train, evaluate and deploy deep learning models at scale.",
-              "Build feature pipelines and model-serving infrastructure.",
-              "Optimize GPU training throughput and inference latency."],
+        tools=["Python", "PyTorch", "Kubernetes", "MLflow", "Spark", "AWS"],
+        desc=[
+            "Train, evaluate and deploy deep learning models at scale.",
+            "Build feature pipelines and model-serving infrastructure.",
+            "Optimize GPU training throughput and inference latency.",
+        ],
         comp=(140_000, 240_000),
     ),
     "devops": dict(
-        titles=["Site Reliability Engineer", "DevOps Engineer",
-                "Infrastructure Engineer"],
+        titles=[
+            "Site Reliability Engineer",
+            "DevOps Engineer",
+            "Infrastructure Engineer",
+        ],
         category="Software Engineering",
-        tools=["Kubernetes", "Terraform", "AWS", "Prometheus", "Go",
-               "Linux"],
-        desc=["Run production infrastructure with strong SLOs and on-call "
-              "rotation.", "Automate provisioning with Terraform and "
-              "GitOps.", "Improve observability with metrics, tracing and "
-              "alerting."],
+        tools=["Kubernetes", "Terraform", "AWS", "Prometheus", "Go", "Linux"],
+        desc=[
+            "Run production infrastructure with strong SLOs and on-call rotation.",
+            "Automate provisioning with Terraform and GitOps.",
+            "Improve observability with metrics, tracing and alerting.",
+        ],
         comp=(130_000, 220_000),
     ),
     "nurse": dict(
-        titles=["Registered Nurse", "RN, Medical-Surgical",
-                "Registered Nurse - ICU"],
+        titles=["Registered Nurse", "RN, Medical-Surgical", "Registered Nurse - ICU"],
         category="Healthcare",
         tools=["Epic", "EMR", "IV therapy"],
-        desc=["Provide direct patient care on a 12-hour shift schedule.",
-              "Active RN license required; BLS and ACLS certification "
-              "preferred.", "Document assessments and medication "
-              "administration in Epic."],
+        desc=[
+            "Provide direct patient care on a 12-hour shift schedule.",
+            "Active RN license required; BLS and ACLS certification preferred.",
+            "Document assessments and medication administration in Epic.",
+        ],
         comp=(70_000, 110_000),
     ),
     "accountant": dict(
-        titles=["Staff Accountant", "Senior Accountant",
-                "Accounting Manager"],
+        titles=["Staff Accountant", "Senior Accountant", "Accounting Manager"],
         category="Finance",
         tools=["Excel", "QuickBooks", "NetSuite", "GAAP"],
-        desc=["Own month-end close, reconciliations and journal entries.",
-              "Prepare financial statements in accordance with GAAP.",
-              "CPA license preferred; support annual audits."],
+        desc=[
+            "Own month-end close, reconciliations and journal entries.",
+            "Prepare financial statements in accordance with GAAP.",
+            "CPA license preferred; support annual audits.",
+        ],
         comp=(65_000, 120_000),
     ),
     "product": dict(
         titles=["Product Manager", "Senior Product Manager"],
         category="Product",
         tools=["SQL", "Jira", "Figma", "Amplitude"],
-        desc=["Define roadmap and requirements for a cross-functional "
-              "product team.", "Talk to customers, size opportunities and "
-              "prioritize ruthlessly.", "Ship iteratively and measure "
-              "outcomes with product analytics."],
+        desc=[
+            "Define roadmap and requirements for a cross-functional product team.",
+            "Talk to customers, size opportunities and prioritize ruthlessly.",
+            "Ship iteratively and measure outcomes with product analytics.",
+        ],
         comp=(130_000, 210_000),
     ),
     "security": dict(
-        titles=["Security Analyst", "Security Engineer",
-                "SOC Analyst"],
+        titles=["Security Analyst", "Security Engineer", "SOC Analyst"],
         category="Security",
         tools=["Splunk", "SIEM", "Python", "AWS", "Wireshark"],
-        desc=["Monitor, triage and respond to security incidents in the "
-              "SOC.", "Active TS/SCI clearance required for this "
-              "position.", "Harden cloud infrastructure and run tabletop "
-              "exercises."],
+        desc=[
+            "Monitor, triage and respond to security incidents in the SOC.",
+            "Active TS/SCI clearance required for this position.",
+            "Harden cloud infrastructure and run tabletop exercises.",
+        ],
         comp=(95_000, 170_000),
     ),
     "warehouse": dict(
-        titles=["Warehouse Associate", "Forklift Operator",
-                "Fulfillment Associate"],
+        titles=["Warehouse Associate", "Forklift Operator", "Fulfillment Associate"],
         category="Operations",
         tools=["Forklift", "RF scanner"],
-        desc=["Pick, pack and ship customer orders accurately and "
-              "safely.", "Operate powered industrial equipment; lift up to "
-              "50 lbs.", "Weekend and holiday availability required during "
-              "peak season."],
+        desc=[
+            "Pick, pack and ship customer orders accurately and safely.",
+            "Operate powered industrial equipment; lift up to 50 lbs.",
+            "Weekend and holiday availability required during peak season.",
+        ],
         comp=(35_000, 52_000),
     ),
 }
@@ -155,8 +177,14 @@ _LOCATIONS = [
     ("London, UK", "United Kingdom", 51.51, -0.13),
 ]
 _COMPANIES = [
-    "Acme Analytics", "Borealis Health", "Cobalt Systems", "Driftwood Labs",
-    "Everline", "Foxglove Robotics", "Granite Peak Software", "Helios Grid",
+    "Acme Analytics",
+    "Borealis Health",
+    "Cobalt Systems",
+    "Driftwood Labs",
+    "Everline",
+    "Foxglove Robotics",
+    "Granite Peak Software",
+    "Helios Grid",
 ]
 
 
@@ -178,11 +206,12 @@ def make_page(arch: str, i: int, rng: random.Random) -> dict:
     comp_lo = float(rng.randrange(lo, hi, 5000))
     comp_hi = comp_lo + rng.randrange(10_000, 40_000, 5000)
     desc_sentences = (
-        [f"{company} is hiring a {seniority.lower()} {title.lower()} "
-         f"in {loc}."]
+        [f"{company} is hiring a {seniority.lower()} {title.lower()} in {loc}."]
         + rng.sample(spec["desc"], k=len(spec["desc"]))
-        + [f"Day to day you will work with {', '.join(tools)}.",
-           "We offer competitive compensation and benefits."]
+        + [
+            f"Day to day you will work with {', '.join(tools)}.",
+            "We offer competitive compensation and benefits.",
+        ]
     )
     # ~1 in 7 same-archetype jobs share a collapse_key (repost dupes);
     # ~1 in 10 is expired.
@@ -201,7 +230,8 @@ def make_page(arch: str, i: int, rng: random.Random) -> dict:
                 "objectID": rid,
                 "job_information": {
                     "title": f"{seniority} {title}"
-                             if seniority != "Entry level" else title,
+                    if seniority != "Entry level"
+                    else title,
                     "job_title_raw": title,
                     "description": " ".join(desc_sentences),
                     "viewedByUsers": None,
@@ -215,15 +245,13 @@ def make_page(arch: str, i: int, rng: random.Random) -> dict:
                     "workplace_type": rng.choice(_WORKPLACE),
                     "formatted_workplace_location": loc,
                     "workplace_countries": [country],
-                    "min_industry_and_role_yoe":
-                        float(_SENIORITY.index(seniority) * 3),
+                    "min_industry_and_role_yoe": float(_SENIORITY.index(seniority) * 3),
                     "yearly_min_compensation": comp_lo,
                     "yearly_max_compensation": comp_hi,
                     "listed_compensation_currency": "USD",
                     "is_compensation_transparent": True,
-                    "estimated_publish_date":
-                        f"2026-{rng.randrange(1, 7):02d}-"
-                        f"{rng.randrange(1, 29):02d}T12:00:00Z",
+                    "estimated_publish_date": f"2026-{rng.randrange(1, 7):02d}-"
+                    f"{rng.randrange(1, 29):02d}T12:00:00Z",
                     "company_name": company,
                     "company_website": "https://example.com",
                 },
@@ -275,8 +303,9 @@ def populate_sqlite(db_path: Path, n: int, seed: int = 42) -> None:
     con.executescript(SQLITE_DDL)
     with con:
         con.executemany(
-            f"INSERT OR REPLACE INTO jobs VALUES "
-            f"({','.join('?' * len(COLUMNS))})", rows(n, seed))
+            f"INSERT OR REPLACE INTO jobs VALUES ({','.join('?' * len(COLUMNS))})",
+            rows(n, seed),
+        )
     con.close()
 
 
@@ -334,8 +363,12 @@ GAAP, Excel, NetSuite, QuickBooks, month-end close, CPA
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, required=True,
-                        help="directory for the .json.gz fixture files")
+    parser.add_argument(
+        "--out",
+        type=Path,
+        required=True,
+        help="directory for the .json.gz fixture files",
+    )
     parser.add_argument("--n", type=int, default=500)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()

@@ -52,12 +52,17 @@ def _rank_resume(con, markdown: str) -> dict[str, list[str]]:
     """-> ranker name -> ranked requisition_ids (depth K)."""
     text = recommend.strip_markdown(markdown)
     keywords = recommend.extract_keywords(con, text)
-    fts = [rid for rid, _ in recommend._fts_search(
-        con, recommend._fts_query(keywords, "OR"), _FLT, K)]
+    fts = [
+        rid
+        for rid, _ in recommend._fts_search(
+            con, recommend._fts_query(keywords, "OR"), _FLT, K
+        )
+    ]
     vec = recommend._query_embedder(con).encode([text])[0]
     knn = [rid for rid, _ in recommend._knn(con, vec, None, K)]
-    hybrid = [r["requisition_id"] for r in
-              recommend.match_resume(con, markdown, _FLT, k=K)[0]]
+    hybrid = [
+        r["requisition_id"] for r in recommend.match_resume(con, markdown, _FLT, k=K)[0]
+    ]
     return {"keyword": fts, "vector": knn, "hybrid": hybrid}
 
 
@@ -65,16 +70,22 @@ def _rank_similar(con, rid: str) -> dict[str, list[str]]:
     row = con.execute(
         "SELECT j.title, j.technical_tools, e.vec FROM jobs j "
         "JOIN job_embeddings e ON e.requisition_id = j.requisition_id "
-        "WHERE j.requisition_id = ?", (rid,)).fetchone()
+        "WHERE j.requisition_id = ?",
+        (rid,),
+    ).fetchone()
     if row is None:
         raise SystemExit(f"labels reference unindexed job {rid!r}")
     tools = " ".join(json.loads(row["technical_tools"] or "[]"))
     toks = recommend._token_re.findall(f"{row['title']} {tools}")
-    fts = [r for r, _ in recommend._fts_search(
-        con, recommend._fts_query(toks, "OR"), _FLT, K + 1) if r != rid][:K]
+    fts = [
+        r
+        for r, _ in recommend._fts_search(
+            con, recommend._fts_query(toks, "OR"), _FLT, K + 1
+        )
+        if r != rid
+    ][:K]
     vec = np.frombuffer(row["vec"], dtype=np.float32)
-    knn = [r for r, _ in recommend._knn(con, vec, None, K + 1)
-           if r != rid][:K]
+    knn = [r for r, _ in recommend._knn(con, vec, None, K + 1) if r != rid][:K]
     fused = recommend.rrf([knn, fts])
     hybrid = sorted(fused, key=fused.__getitem__, reverse=True)[:K]
     return {"keyword": fts, "vector": knn, "hybrid": hybrid}
@@ -118,11 +129,15 @@ def synthetic_cases(con) -> list[dict]:
         by_arch.setdefault(make_fixtures.archetype_of(rid), []).append(rid)
     cases: list[dict] = []
     for arch, md in make_fixtures.RESUMES.items():
-        cases.append({"type": "resume", "markdown": md,
-                      "relevant": by_arch[arch]})
+        cases.append({"type": "resume", "markdown": md, "relevant": by_arch[arch]})
     for arch, rids in sorted(by_arch.items()):
-        cases.append({"type": "similar", "requisition_id": rids[0],
-                      "relevant": [r for r in rids if r != rids[0]]})
+        cases.append(
+            {
+                "type": "similar",
+                "requisition_id": rids[0],
+                "relevant": [r for r in rids if r != rids[0]],
+            }
+        )
     return cases
 
 

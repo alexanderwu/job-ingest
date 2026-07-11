@@ -68,9 +68,7 @@ class SentenceTransformerEmbedder:
         self.dim = int(self._model.get_sentence_embedding_dimension())
 
     def encode(self, texts: list[str]) -> np.ndarray:
-        return _l2_normalize(
-            self._model.encode(texts, normalize_embeddings=True)
-        )
+        return _l2_normalize(self._model.encode(texts, normalize_embeddings=True))
 
 
 class HashEmbedder:

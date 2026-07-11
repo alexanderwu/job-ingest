@@ -28,6 +28,7 @@ dev = [
     # fastapi + httpx so tests can exercise api.py via TestClient
     "fastapi>=0.110",
     "httpx>=0.27",
+    "ruff>=0.15.21",
 ]
 
 [tool.uv]

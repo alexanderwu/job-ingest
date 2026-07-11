@@ -48,18 +48,30 @@ RRF_K = 60  # standard Reciprocal Rank Fusion constant
 
 # Columns returned for every result row.
 RESULT_COLUMNS = (
-    "requisition_id", "title", "core_job_title", "company_name",
-    "job_category", "seniority_level", "role_type", "workplace_type",
-    "formatted_workplace_location", "min_industry_and_role_yoe",
-    "yearly_min_compensation", "yearly_max_compensation",
-    "listed_compensation_currency", "is_expired", "collapse_key",
-    "apply_url", "estimated_publish_date",
+    "requisition_id",
+    "title",
+    "core_job_title",
+    "company_name",
+    "job_category",
+    "seniority_level",
+    "role_type",
+    "workplace_type",
+    "formatted_workplace_location",
+    "min_industry_and_role_yoe",
+    "yearly_min_compensation",
+    "yearly_max_compensation",
+    "listed_compensation_currency",
+    "is_expired",
+    "collapse_key",
+    "apply_url",
+    "estimated_publish_date",
 )
 
 
 # --------------------------------------------------------------------------
 # Connection / metadata
 # --------------------------------------------------------------------------
+
 
 def get_connection(db_path: Path | str = DEFAULT_DB) -> sqlite3.Connection:
     """Read-only connection with sqlite-vec loaded when available."""
@@ -73,8 +85,7 @@ def get_meta(con: sqlite3.Connection) -> dict:
     try:
         return dict(con.execute("SELECT key, value FROM rec_meta"))
     except sqlite3.OperationalError:
-        raise SystemExit(
-            "rec tables missing — run `uv run recindex.py` first")
+        raise SystemExit("rec tables missing — run `uv run recindex.py` first")
 
 
 _embedder_cache: dict[str, object] = {}
@@ -92,6 +103,7 @@ def _query_embedder(con: sqlite3.Connection):
 # Filters
 # --------------------------------------------------------------------------
 
+
 @dataclass
 class Filters:
     """Structured filters; composes with every query type. List fields
@@ -101,12 +113,12 @@ class Filters:
     seniority: list[str] = field(default_factory=list)
     workplace_types: list[str] = field(default_factory=list)
     role_types: list[str] = field(default_factory=list)
-    countries: list[str] = field(default_factory=list)   # workplace_countries
-    tools: list[str] = field(default_factory=list)       # technical_tools
-    location: str | None = None    # substring of formatted_workplace_location
-    company: str | None = None     # substring of company_name
+    countries: list[str] = field(default_factory=list)  # workplace_countries
+    tools: list[str] = field(default_factory=list)  # technical_tools
+    location: str | None = None  # substring of formatted_workplace_location
+    company: str | None = None  # substring of company_name
     min_comp: float | None = None  # yearly; job's best-known comp >= this
-    max_yoe: float | None = None   # keep jobs asking <= this (or unstated)
+    max_yoe: float | None = None  # keep jobs asking <= this (or unstated)
     include_expired: bool = False
 
     def where(self, alias: str = "j") -> tuple[str, list]:
@@ -131,7 +143,8 @@ class Filters:
             for c in self.countries:
                 ors.append(
                     f"EXISTS (SELECT 1 FROM json_each("
-                    f"{alias}.workplace_countries) WHERE lower(value) = ?)")
+                    f"{alias}.workplace_countries) WHERE lower(value) = ?)"
+                )
                 ps.append(c.lower())
             conds.append("(" + " OR ".join(ors) + ")")
             params.extend(ps)
@@ -139,12 +152,11 @@ class Filters:
             for t in self.tools:  # AND across tools: must have all
                 conds.append(
                     f"EXISTS (SELECT 1 FROM json_each("
-                    f"{alias}.technical_tools) WHERE lower(value) = ?)")
+                    f"{alias}.technical_tools) WHERE lower(value) = ?)"
+                )
                 params.append(t.lower())
         if self.location:
-            conds.append(
-                f"{alias}.formatted_workplace_location LIKE ? "
-                f"COLLATE NOCASE")
+            conds.append(f"{alias}.formatted_workplace_location LIKE ? COLLATE NOCASE")
             params.append(f"%{self.location}%")
         if self.company:
             conds.append(f"{alias}.company_name LIKE ? COLLATE NOCASE")
@@ -152,11 +164,11 @@ class Filters:
         if self.min_comp is not None:
             conds.append(
                 f"COALESCE({alias}.yearly_max_compensation, "
-                f"{alias}.yearly_min_compensation) >= ?")
+                f"{alias}.yearly_min_compensation) >= ?"
+            )
             params.append(self.min_comp)
         if self.max_yoe is not None:
-            conds.append(
-                f"COALESCE({alias}.min_industry_and_role_yoe, 0) <= ?")
+            conds.append(f"COALESCE({alias}.min_industry_and_role_yoe, 0) <= ?")
             params.append(self.max_yoe)
         if not self.include_expired:
             conds.append(f"{alias}.is_expired = 0")
@@ -169,17 +181,14 @@ def _db_token(con: sqlite3.Connection) -> tuple:
     return (
         con.execute("PRAGMA database_list").fetchone()[2],
         con.execute("PRAGMA data_version").fetchone()[0],
-        *con.execute(
-            "SELECT COUNT(*), COALESCE(MAX(id), 0) FROM rec_rows"
-        ).fetchone(),
+        *con.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM rec_rows").fetchone(),
     )
 
 
 _candidate_cache: dict[tuple, list[int] | None] = {}
 
 
-def _candidate_ids(con: sqlite3.Connection, flt: Filters | None
-                   ) -> list[int] | None:
+def _candidate_ids(con: sqlite3.Connection, flt: Filters | None) -> list[int] | None:
     """rec_rows.id set passing the filters (the vector leg's pre-filter);
     None = unconstrained. Cached per filter until the DB changes."""
     if flt is None:
@@ -191,16 +200,22 @@ def _candidate_ids(con: sqlite3.Connection, flt: Filters | None
     if key not in _candidate_cache:
         if len(_candidate_cache) > 64:
             _candidate_cache.clear()
-        _candidate_cache[key] = [r[0] for r in con.execute(
-            f"SELECT r.id FROM rec_rows r "
-            f"JOIN jobs j ON j.requisition_id = r.requisition_id "
-            f"WHERE {cond}", params)]
+        _candidate_cache[key] = [
+            r[0]
+            for r in con.execute(
+                f"SELECT r.id FROM rec_rows r "
+                f"JOIN jobs j ON j.requisition_id = r.requisition_id "
+                f"WHERE {cond}",
+                params,
+            )
+        ]
     return _candidate_cache[key]
 
 
 # --------------------------------------------------------------------------
 # Hydration
 # --------------------------------------------------------------------------
+
 
 def _hydrate(con: sqlite3.Connection, rids: list[str]) -> list[dict]:
     """requisition_ids -> job dicts, preserving input order."""
@@ -211,7 +226,9 @@ def _hydrate(con: sqlite3.Connection, rids: list[str]) -> list[dict]:
         r["requisition_id"]: dict(r)
         for r in con.execute(
             f"SELECT {', '.join(RESULT_COLUMNS)} FROM jobs "
-            f"WHERE requisition_id IN ({qs})", rids)
+            f"WHERE requisition_id IN ({qs})",
+            rids,
+        )
     }
     return [rows[rid] for rid in rids if rid in rows]
 
@@ -220,8 +237,10 @@ def _hydrate(con: sqlite3.Connection, rids: list[str]) -> list[dict]:
 # 1) Structured filtering
 # --------------------------------------------------------------------------
 
-def filter_jobs(con: sqlite3.Connection, flt: Filters | None = None,
-                limit: int = 20) -> list[dict]:
+
+def filter_jobs(
+    con: sqlite3.Connection, flt: Filters | None = None, limit: int = 20
+) -> list[dict]:
     """Newest-first listing of jobs passing the filters."""
     flt = flt or Filters()
     cond, params = flt.where("j")
@@ -229,7 +248,8 @@ def filter_jobs(con: sqlite3.Connection, flt: Filters | None = None,
         f"SELECT {', '.join(RESULT_COLUMNS)} FROM jobs j WHERE {cond} "
         f"ORDER BY j.estimated_publish_date IS NULL, "
         f"j.estimated_publish_date DESC LIMIT ?",
-        params + [limit])
+        params + [limit],
+    )
     return [dict(r) for r in rows]
 
 
@@ -245,8 +265,9 @@ def _fts_query(tokens: list[str], operator: str = "AND") -> str:
     return f" {operator} ".join(quoted)
 
 
-def _fts_search(con: sqlite3.Connection, match: str,
-                flt: Filters | None, k: int) -> list[tuple[str, float]]:
+def _fts_search(
+    con: sqlite3.Connection, match: str, flt: Filters | None, k: int
+) -> list[tuple[str, float]]:
     """-> [(requisition_id, bm25)] best-first; [] on empty/invalid query.
 
     Filters are applied after the join rather than as an id pre-filter:
@@ -265,14 +286,14 @@ def _fts_search(con: sqlite3.Connection, match: str,
         f"WHERE jobs_fts MATCH ? AND {cond} ORDER BY s LIMIT ?"
     )
     try:
-        return [(r[0], r[1])
-                for r in con.execute(sql, [match, *params, k])]
+        return [(r[0], r[1]) for r in con.execute(sql, [match, *params, k])]
     except sqlite3.OperationalError:  # unparsable user query
         return []
 
 
-def search_keywords(con: sqlite3.Connection, query: str,
-                    flt: Filters | None = None, k: int = 20) -> list[dict]:
+def search_keywords(
+    con: sqlite3.Connection, query: str, flt: Filters | None = None, k: int = 20
+) -> list[dict]:
     """FTS5 search; all terms required, relaxed to OR when nothing hits."""
     tokens = _token_re.findall(query)
     hits = _fts_search(con, _fts_query(tokens, "AND"), flt, k)
@@ -303,15 +324,18 @@ def _load_matrix(con: sqlite3.Connection) -> tuple[list[int], np.ndarray]:
     for rowid, blob in con.execute("SELECT id, vec FROM job_embeddings"):
         ids.append(rowid)
         blobs.append(blob)
-    mat = (np.frombuffer(b"".join(blobs), dtype=np.float32)
-           .reshape(len(ids), dim) if ids
-           else np.zeros((0, dim), dtype=np.float32))
+    mat = (
+        np.frombuffer(b"".join(blobs), dtype=np.float32).reshape(len(ids), dim)
+        if ids
+        else np.zeros((0, dim), dtype=np.float32)
+    )
     _matrix_cache[key] = (token, ids, mat)
     return ids, mat
 
 
-def _knn(con: sqlite3.Connection, vec: np.ndarray,
-         ids: list[int] | None, k: int) -> list[tuple[str, float]]:
+def _knn(
+    con: sqlite3.Connection, vec: np.ndarray, ids: list[int] | None, k: int
+) -> list[tuple[str, float]]:
     """-> [(requisition_id, cosine_similarity)] best-first."""
     if ids is not None and not ids:
         return []
@@ -343,27 +367,32 @@ def _knn(con: sqlite3.Connection, vec: np.ndarray,
     return _ids_to_rids(con, pairs)
 
 
-def _ids_to_rids(con: sqlite3.Connection,
-                 pairs: list[tuple[int, float]]) -> list[tuple[str, float]]:
+def _ids_to_rids(
+    con: sqlite3.Connection, pairs: list[tuple[int, float]]
+) -> list[tuple[str, float]]:
     if not pairs:
         return []
     qs = ", ".join(str(i) for i, _ in pairs)
-    m = dict(con.execute(
-        f"SELECT id, requisition_id FROM rec_rows WHERE id IN ({qs})"))
+    m = dict(con.execute(f"SELECT id, requisition_id FROM rec_rows WHERE id IN ({qs})"))
     return [(m[i], s) for i, s in pairs if i in m]
 
 
-def similar_jobs(con: sqlite3.Connection, requisition_id: str,
-                 flt: Filters | None = None, k: int = 20,
-                 collapse_dupes: bool = True) -> list[dict]:
+def similar_jobs(
+    con: sqlite3.Connection,
+    requisition_id: str,
+    flt: Filters | None = None,
+    k: int = 20,
+    collapse_dupes: bool = True,
+) -> list[dict]:
     """Jobs nearest to job X's stored embedding, X itself excluded."""
     row = con.execute(
         "SELECT e.vec, j.collapse_key FROM job_embeddings e "
         "JOIN jobs j ON j.requisition_id = e.requisition_id "
-        "WHERE e.requisition_id = ?", (requisition_id,)).fetchone()
+        "WHERE e.requisition_id = ?",
+        (requisition_id,),
+    ).fetchone()
     if row is None:
-        raise KeyError(f"unknown or unindexed requisition_id "
-                       f"{requisition_id!r}")
+        raise KeyError(f"unknown or unindexed requisition_id {requisition_id!r}")
     vec = np.frombuffer(row[0], dtype=np.float32)
     own_collapse = row[1]
     ids = _candidate_ids(con, flt)
@@ -391,14 +420,14 @@ def similar_jobs(con: sqlite3.Connection, requisition_id: str,
 # --------------------------------------------------------------------------
 
 _MD_PATTERNS = [
-    (re.compile(r"```.*?```", re.S), " "),          # fenced code
-    (re.compile(r"`([^`]*)`"), r"\1"),              # inline code
-    (re.compile(r"!\[[^\]]*\]\([^)]*\)"), " "),     # images
+    (re.compile(r"```.*?```", re.S), " "),  # fenced code
+    (re.compile(r"`([^`]*)`"), r"\1"),  # inline code
+    (re.compile(r"!\[[^\]]*\]\([^)]*\)"), " "),  # images
     (re.compile(r"\[([^\]]*)\]\([^)]*\)"), r"\1"),  # links -> text
-    (re.compile(r"^#{1,6}\s*", re.M), ""),          # heading markers
-    (re.compile(r"^\s*[-*+]\s+", re.M), ""),        # bullets
+    (re.compile(r"^#{1,6}\s*", re.M), ""),  # heading markers
+    (re.compile(r"^\s*[-*+]\s+", re.M), ""),  # bullets
     (re.compile(r"[*_]{1,3}([^*_]+)[*_]{1,3}"), r"\1"),  # emphasis
-    (re.compile(r"\|"), " "),                       # table pipes
+    (re.compile(r"\|"), " "),  # table pipes
 ]
 
 
@@ -427,12 +456,13 @@ def _corpus_vocab(con: sqlite3.Connection) -> frozenset:
         return _vocab_cache[key]
     vocab: set[str] = set()
     for (tool,) in con.execute(
-            "SELECT DISTINCT lower(value) FROM jobs, "
-            "json_each(jobs.technical_tools)"):
+        "SELECT DISTINCT lower(value) FROM jobs, json_each(jobs.technical_tools)"
+    ):
         vocab.add(tool)
     for (title,) in con.execute(
-            "SELECT DISTINCT lower(core_job_title) FROM jobs "
-            "WHERE core_job_title IS NOT NULL"):
+        "SELECT DISTINCT lower(core_job_title) FROM jobs "
+        "WHERE core_job_title IS NOT NULL"
+    ):
         toks = _token_re.findall(title)
         vocab.update(toks)
         vocab.update(f"{a} {b}" for a, b in zip(toks, toks[1:]))
@@ -442,8 +472,9 @@ def _corpus_vocab(con: sqlite3.Connection) -> frozenset:
     return out
 
 
-def extract_keywords(con: sqlite3.Connection, text: str,
-                     max_terms: int = 24) -> list[str]:
+def extract_keywords(
+    con: sqlite3.Connection, text: str, max_terms: int = 24
+) -> list[str]:
     """Resume terms that exist in the corpus vocabulary (tools + title
     n-grams), longest phrases first; falls back to frequent resume tokens
     so the FTS leg never goes in empty."""
@@ -477,9 +508,12 @@ def rrf(ranked_lists: list[list[str]], k0: int = RRF_K) -> dict[str, float]:
     return scores
 
 
-def match_resume(con: sqlite3.Connection, markdown: str,
-                 flt: Filters | None = None, k: int = 20,
-                 ) -> tuple[list[dict], list[str]]:
+def match_resume(
+    con: sqlite3.Connection,
+    markdown: str,
+    flt: Filters | None = None,
+    k: int = 20,
+) -> tuple[list[dict], list[str]]:
     """-> (ranked job dicts, extracted keywords). Hybrid retrieval:
     one embedding for the whole resume -> k-NN, extracted keywords ->
     FTS, RRF to fuse; filters pre-filter both legs."""
@@ -517,34 +551,48 @@ def match_resume(con: sqlite3.Connection, markdown: str,
 # CLI
 # --------------------------------------------------------------------------
 
+
 def _add_filter_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--db", type=Path, default=DEFAULT_DB)
     p.add_argument("--category", action="append", default=[])
     p.add_argument("--seniority", action="append", default=[])
-    p.add_argument("--workplace", action="append", default=[],
-                   help="workplace_type, e.g. Remote / On-site / Hybrid")
+    p.add_argument(
+        "--workplace",
+        action="append",
+        default=[],
+        help="workplace_type, e.g. Remote / On-site / Hybrid",
+    )
     p.add_argument("--role-type", action="append", default=[])
     p.add_argument("--country", action="append", default=[])
-    p.add_argument("--tool", action="append", default=[],
-                   help="require this technical tool (repeatable, AND)")
+    p.add_argument(
+        "--tool",
+        action="append",
+        default=[],
+        help="require this technical tool (repeatable, AND)",
+    )
     p.add_argument("--location", help="substring of the formatted location")
     p.add_argument("--company", help="substring of the company name")
-    p.add_argument("--min-comp", type=float,
-                   help="minimum yearly compensation")
-    p.add_argument("--max-yoe", type=float,
-                   help="max years-of-experience the job may require")
+    p.add_argument("--min-comp", type=float, help="minimum yearly compensation")
+    p.add_argument(
+        "--max-yoe", type=float, help="max years-of-experience the job may require"
+    )
     p.add_argument("--include-expired", action="store_true")
     p.add_argument("-k", "--limit", type=int, default=20)
-    p.add_argument("--json", action="store_true",
-                   help="print results as a JSON array")
+    p.add_argument("--json", action="store_true", help="print results as a JSON array")
 
 
 def _filters(args: argparse.Namespace) -> Filters:
     return Filters(
-        categories=args.category, seniority=args.seniority,
-        workplace_types=args.workplace, role_types=args.role_type,
-        countries=args.country, tools=args.tool, location=args.location,
-        company=args.company, min_comp=args.min_comp, max_yoe=args.max_yoe,
+        categories=args.category,
+        seniority=args.seniority,
+        workplace_types=args.workplace,
+        role_types=args.role_type,
+        countries=args.country,
+        tools=args.tool,
+        location=args.location,
+        company=args.company,
+        min_comp=args.min_comp,
+        max_yoe=args.max_yoe,
         include_expired=args.include_expired,
     )
 
@@ -559,16 +607,16 @@ def _print_results(rows: list[dict], as_json: bool) -> None:
     for i, r in enumerate(rows, 1):
         comp = ""
         if r["yearly_min_compensation"] or r["yearly_max_compensation"]:
-            lo, hi = (r["yearly_min_compensation"],
-                      r["yearly_max_compensation"])
+            lo, hi = (r["yearly_min_compensation"], r["yearly_max_compensation"])
             comp = f"  ${lo or hi:,.0f}–${hi or lo:,.0f}"
         score = f"  [{r['score']:.4g}]" if "score" in r else ""
-        print(f"{i:>3}. {r['title']} — {r['company_name'] or '?'}"
-              f"{score}")
-        print(f"     {r['seniority_level'] or '-'} | "
-              f"{r['workplace_type'] or '-'} | "
-              f"{r['formatted_workplace_location'] or '-'}{comp}  "
-              f"({r['requisition_id']})")
+        print(f"{i:>3}. {r['title']} — {r['company_name'] or '?'}{score}")
+        print(
+            f"     {r['seniority_level'] or '-'} | "
+            f"{r['workplace_type'] or '-'} | "
+            f"{r['formatted_workplace_location'] or '-'}{comp}  "
+            f"({r['requisition_id']})"
+        )
 
 
 def main() -> None:
@@ -580,8 +628,11 @@ def main() -> None:
     p_search.add_argument("query")
     p_similar = sub.add_parser("similar", help="jobs similar to job X")
     p_similar.add_argument("requisition_id")
-    p_similar.add_argument("--keep-dupes", action="store_true",
-                           help="don't collapse same-collapse_key posts")
+    p_similar.add_argument(
+        "--keep-dupes",
+        action="store_true",
+        help="don't collapse same-collapse_key posts",
+    )
     p_resume = sub.add_parser("resume", help="match a markdown resume")
     p_resume.add_argument("resume_md", type=Path)
     for p in (p_filter, p_search, p_similar, p_resume):
@@ -597,15 +648,19 @@ def main() -> None:
         rows = search_keywords(con, args.query, flt, k=args.limit)
     elif args.cmd == "similar":
         try:
-            rows = similar_jobs(con, args.requisition_id, flt,
-                                k=args.limit,
-                                collapse_dupes=not args.keep_dupes)
+            rows = similar_jobs(
+                con,
+                args.requisition_id,
+                flt,
+                k=args.limit,
+                collapse_dupes=not args.keep_dupes,
+            )
         except KeyError as e:
             raise SystemExit(str(e))
     else:
         rows, keywords = match_resume(
-            con, args.resume_md.read_text(encoding="utf-8"), flt,
-            k=args.limit)
+            con, args.resume_md.read_text(encoding="utf-8"), flt, k=args.limit
+        )
         if not args.json:
             print(f"keywords: {', '.join(keywords) or '(none)'}\n")
     _print_results(rows, args.json)

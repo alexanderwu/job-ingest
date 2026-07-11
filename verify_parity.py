@@ -38,8 +38,11 @@ from job_schema import COLUMNS, decode_page, flatten  # noqa: E402
 
 # JSON-array/object text columns: compare parsed values (and key order).
 JSON_COLUMNS = {
-    "workplace_countries", "technical_tools", "job_information_json",
-    "v5_processed_job_data_json", "enriched_company_data_json",
+    "workplace_countries",
+    "technical_tools",
+    "job_information_json",
+    "v5_processed_job_data_json",
+    "enriched_company_data_json",
 }
 # Datetime-valued keys inside the JSON blobs, normalized before comparison.
 BLOB_DATETIME_KEYS = {"estimated_publish_date", "enriched_at"}
@@ -61,21 +64,29 @@ def compare_value(col: str, py_val, rs_val) -> str | None:
     """Return an error description, or None if equal under the column's rule."""
     if col in JSON_COLUMNS:
         if py_val is None or rs_val is None:
-            return None if py_val == rs_val else f"null mismatch: {py_val!r} vs {rs_val!r}"
+            return (
+                None if py_val == rs_val else f"null mismatch: {py_val!r} vs {rs_val!r}"
+            )
         py_parsed, rs_parsed = json.loads(py_val), json.loads(rs_val)
         if isinstance(py_parsed, dict):
             if list(py_parsed.keys()) != list(rs_parsed.keys()):
                 only_py = [k for k in py_parsed if k not in rs_parsed]
                 only_rs = [k for k in rs_parsed if k not in py_parsed]
-                return (f"key order/set mismatch (only-python={only_py}, "
-                        f"only-rust={only_rs})")
+                return (
+                    f"key order/set mismatch (only-python={only_py}, "
+                    f"only-rust={only_rs})"
+                )
         if _normalize_json_value(py_parsed) != _normalize_json_value(rs_parsed):
-            return f"value mismatch:\n  python: {py_val[:400]}\n  rust:   {rs_val[:400]}"
+            return (
+                f"value mismatch:\n  python: {py_val[:400]}\n  rust:   {rs_val[:400]}"
+            )
         return None
     if col == "estimated_publish_date":
         if (py_val is None) != (rs_val is None):
             return f"null mismatch: {py_val!r} vs {rs_val!r}"
-        if py_val is not None and datetime.fromisoformat(py_val) != datetime.fromisoformat(rs_val):
+        if py_val is not None and datetime.fromisoformat(
+            py_val
+        ) != datetime.fromisoformat(rs_val):
             return f"datetime mismatch: {py_val!r} vs {rs_val!r}"
         return None
     if py_val != rs_val:
@@ -121,7 +132,9 @@ def main() -> None:
         py_row = flatten(page)
         rid = py_row[COLUMNS.index("requisition_id")]
         if rid not in index:
-            mismatch_counts["<missing row>"] = mismatch_counts.get("<missing row>", 0) + 1
+            mismatch_counts["<missing row>"] = (
+                mismatch_counts.get("<missing row>", 0) + 1
+            )
             if len(first_diffs) < 10:
                 first_diffs.append(
                     f"{path.name}: requisition_id {rid!r} not in Arrow table "

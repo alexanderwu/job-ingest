@@ -42,8 +42,9 @@ app = FastAPI(title="job-ingest recommendations", version="0.1.0")
 
 def get_conn():
     if not DB_PATH.exists():
-        raise HTTPException(503, f"{DB_PATH} not found — run the ingest "
-                                 f"and recindex first")
+        raise HTTPException(
+            503, f"{DB_PATH} not found — run the ingest and recindex first"
+        )
     con = recommend.get_connection(DB_PATH)
     try:
         yield con
@@ -68,10 +69,16 @@ def filter_params(
     include_expired: bool = False,
 ) -> Filters:
     return Filters(
-        categories=category, seniority=seniority,
-        workplace_types=workplace, role_types=role_type,
-        countries=country, tools=tool, location=location, company=company,
-        min_comp=min_comp, max_yoe=max_yoe,
+        categories=category,
+        seniority=seniority,
+        workplace_types=workplace,
+        role_types=role_type,
+        countries=country,
+        tools=tool,
+        location=location,
+        company=company,
+        min_comp=min_comp,
+        max_yoe=max_yoe,
         include_expired=include_expired,
     )
 
@@ -91,11 +98,13 @@ def search(con: Conn, flt: Flt, q: str, k: K = 20) -> list[dict]:
 
 
 @app.get("/similar/{requisition_id}")
-def similar(con: Conn, flt: Flt, requisition_id: str, k: K = 20,
-            collapse_dupes: bool = True) -> list[dict]:
+def similar(
+    con: Conn, flt: Flt, requisition_id: str, k: K = 20, collapse_dupes: bool = True
+) -> list[dict]:
     try:
-        return recommend.similar_jobs(con, requisition_id, flt, k=k,
-                                      collapse_dupes=collapse_dupes)
+        return recommend.similar_jobs(
+            con, requisition_id, flt, k=k, collapse_dupes=collapse_dupes
+        )
     except KeyError as e:
         raise HTTPException(404, str(e))
 
@@ -106,6 +115,5 @@ class ResumeBody(BaseModel):
 
 @app.post("/resume")
 def resume(con: Conn, flt: Flt, body: ResumeBody, k: K = 20) -> dict:
-    results, keywords = recommend.match_resume(con, body.markdown, flt,
-                                               k=k)
+    results, keywords = recommend.match_resume(con, body.markdown, flt, k=k)
     return {"keywords": keywords, "results": results}
