@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["requests"]
-# ///
 """
 HiringCafe job scraper (Job Scout).
 
@@ -26,23 +22,25 @@ Usage:
 Tip: for filters (salary, remote, seniority...), set them in the hiringcafe.com UI,
 copy the URL from your address bar, and pass it via --url.
 
-Example URL: https://hiringcafe.com/?searchState=%7B%22searchQuery%22%3A%22software%20engineer%22%7D
+Example URL:
+  https://hiringcafe.com/?searchState=%7B%22searchQuery%22%3A%22software%20engineer%22%7D
 
-Requires: pip install requests
+Requires: pip install requests typer
 Be polite: keep --delay >= 0.5s. Unofficial API; their robots.txt discourages
 bulk crawling, so scrape only what you need.
 """
 
-import argparse
 import csv
 import json
 import re
 import sys
 import time
 from html.parser import HTMLParser
+from typing import Optional
 from urllib.parse import quote, urlparse, parse_qs
 
 import requests
+import typer
 
 BASE = "https://hiringcafe.com"
 USER_AGENT = (
@@ -201,57 +199,60 @@ def flatten(hit: dict, detail: dict | None, canonical_url: str) -> dict:
 
 
 # ------------------------------------------------------------------------ main
-def parse_search_state(args) -> dict:
-    if args.url:
-        qs = parse_qs(urlparse(args.url).query)
+def parse_search_state(query: Optional[str], url: Optional[str],
+                        search_state: Optional[str]) -> dict:
+    if url:
+        qs = parse_qs(urlparse(url).query)
         if "searchState" in qs:
             return json.loads(qs["searchState"][0])
         print("WARNING: no searchState in --url; scraping default feed.", file=sys.stderr)
         return {}
-    if args.search_state:
-        return json.loads(args.search_state)
-    if args.query:
-        return {"searchQuery": args.query}
+    if search_state:
+        return json.loads(search_state)
+    if query:
+        return {"searchQuery": query}
     return {}
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Scrape job listings from hiringcafe.com")
-    ap.add_argument("--query", help='keyword search, e.g. "software engineer"')
-    ap.add_argument("--url", help="a hiringcafe.com URL with searchState (set filters in the UI, copy the URL)")
-    ap.add_argument("--search-state", help="raw searchState JSON string")
-    ap.add_argument("--max-jobs", type=int, default=40)
-    ap.add_argument("--max-pages", type=int, default=25)
-    ap.add_argument("--delay", type=float, default=1.0, help="seconds between requests (default 1.0)")
-    ap.add_argument("--out", default="hiringcafe_jobs.csv")
-    ap.add_argument("--jsonl", help="also dump raw job JSON to this file")
-    ap.add_argument("--no-descriptions", action="store_true",
-                    help="skip per-job detail fetches (much faster, no description text)")
-    args = ap.parse_args()
+app = typer.Typer(add_completion=False, help="Scrape job listings from hiringcafe.com", context_settings={"help_option_names": ["-h", "--help"]})
 
-    if args.delay < 0.5:
+
+@app.command()
+def main(
+    query: Optional[str] = typer.Option(None, "--query", help='keyword search, e.g. "software engineer"'),
+    url: Optional[str] = typer.Option(None, "--url", help="a hiringcafe.com URL with searchState (set filters in the UI, copy the URL)"),
+    search_state: Optional[str] = typer.Option(None, "--search-state", help="raw searchState JSON string"),
+    max_jobs: int = typer.Option(40, "--max-jobs"),
+    max_pages: int = typer.Option(25, "--max-pages"),
+    delay: float = typer.Option(1.0, "--delay", help="seconds between requests (default 1.0)"),
+    out: str = typer.Option("hiringcafe_jobs.csv", "--out"),
+    jsonl: Optional[str] = typer.Option(None, "--jsonl", help="also dump raw job JSON to this file"),
+    no_descriptions: bool = typer.Option(False, "--no-descriptions",
+                                          help="skip per-job detail fetches (much faster, no description text)"),
+):
+    if delay < 0.5:
         print("Refusing delay < 0.5s — be polite to their servers.", file=sys.stderr)
-        args.delay = 0.5
+        delay = 0.5
 
-    search_state = parse_search_state(args)
-    client = Client(args.delay)
+    search_state_dict = parse_search_state(query, url, search_state)
+    client = Client(delay)
 
     print("Bootstrapping buildId...")
     build_id = get_build_id(client)
     print(f"  buildId = {build_id}")
 
     rows, seen = [], set()
-    raw_dump = open(args.jsonl, "w", encoding="utf-8") if args.jsonl else None
+    raw_dump = open(jsonl, "w", encoding="utf-8") if jsonl else None
     page = 0
     try:
-        while len(rows) < args.max_jobs and page < args.max_pages:
+        while len(rows) < max_jobs and page < max_pages:
             print(f"Search page {page}...")
             try:
-                props = search_page(client, build_id, search_state, page)
+                props = search_page(client, build_id, search_state_dict, page)
             except StaleBuildId:
                 print("  buildId went stale (site redeployed); re-bootstrapping...")
                 build_id = get_build_id(client)
-                props = search_page(client, build_id, search_state, page)
+                props = search_page(client, build_id, search_state_dict, page)
 
             hits = props.get("ssrHits") or []
             if page == 0:
@@ -263,11 +264,11 @@ def main():
             print(f"  {len(hits)} hits, {len(new_hits)} new")
 
             for hit in new_hits:
-                if len(rows) >= args.max_jobs:
+                if len(rows) >= max_jobs:
                     break
                 seen.add(hit.get("id"))
                 detail, canonical_url = None, ""
-                if not args.no_descriptions:
+                if not no_descriptions:
                     try:
                         detail, canonical_url = fetch_job_detail(
                             client, build_id, hit["requisition_id"])
@@ -283,7 +284,7 @@ def main():
                 if raw_dump:
                     raw_dump.write(json.dumps(
                         {"hit": hit, "detail": detail}, ensure_ascii=False) + "\n")
-                print(f"  [{len(rows)}/{args.max_jobs}] {row['title']} @ {row['company']}"
+                print(f"  [{len(rows)}/{max_jobs}] {row['title']} @ {row['company']}"
                       f" (desc: {len(row['description_text'])} chars)")
 
             if props.get("ssrIsLastPage") or not new_hits:
@@ -296,15 +297,15 @@ def main():
         if raw_dump:
             raw_dump.close()
 
-    with open(args.out, "w", newline="", encoding="utf-8-sig") as f:
+    with open(out, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         w.writeheader()
         w.writerows(rows)
 
     with_desc = sum(1 for r in rows if len(r["description_text"]) > 100)
-    print(f"\nDone: {len(rows)} jobs -> {args.out}"
+    print(f"\nDone: {len(rows)} jobs -> {out}"
           f" ({with_desc} with full descriptions)")
 
 
 if __name__ == "__main__":
-    main()
+    app()
