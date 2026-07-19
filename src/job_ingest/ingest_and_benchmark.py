@@ -86,45 +86,50 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from job_schema import COLUMNS, decode_page, flatten  # noqa: E402
 
 CRATE_DIR = Path(__file__).resolve().parent / "fastingest"
-RUST_BIN = CRATE_DIR / "target" / "release" / (
-    "fastingest.exe" if os.name == "nt" else "fastingest"
+RUST_BIN = (
+    CRATE_DIR
+    / "target"
+    / "release"
+    / ("fastingest.exe" if os.name == "nt" else "fastingest")
 )
 
-ARROW_SCHEMA = pa.schema([
-    ("id", pa.string()),
-    ("source", pa.string()),
-    ("board_token", pa.string()),
-    ("apply_url", pa.string()),
-    ("requisition_id", pa.string()),
-    ("collapse_key", pa.string()),
-    ("is_expired", pa.bool_()),
-    ("title", pa.string()),
-    ("job_title_raw", pa.string()),
-    ("description", pa.string()),
-    ("core_job_title", pa.string()),
-    ("job_category", pa.string()),
-    ("seniority_level", pa.string()),
-    ("role_type", pa.string()),
-    ("workplace_type", pa.string()),
-    ("formatted_workplace_location", pa.string()),
-    ("workplace_countries", pa.string()),
-    ("min_industry_and_role_yoe", pa.float64()),
-    ("yearly_min_compensation", pa.float64()),
-    ("yearly_max_compensation", pa.float64()),
-    ("listed_compensation_currency", pa.string()),
-    ("technical_tools", pa.string()),
-    ("estimated_publish_date", pa.string()),
-    ("company_name", pa.string()),
-    ("company_website", pa.string()),
-    ("enriched_status", pa.string()),
-    ("nb_employees", pa.int64()),
-    ("year_founded", pa.int64()),
-    ("latitude", pa.float64()),
-    ("longitude", pa.float64()),
-    ("job_information_json", pa.string()),
-    ("v5_processed_job_data_json", pa.string()),
-    ("enriched_company_data_json", pa.string()),
-])
+ARROW_SCHEMA = pa.schema(
+    [
+        ("id", pa.string()),
+        ("source", pa.string()),
+        ("board_token", pa.string()),
+        ("apply_url", pa.string()),
+        ("requisition_id", pa.string()),
+        ("collapse_key", pa.string()),
+        ("is_expired", pa.bool_()),
+        ("title", pa.string()),
+        ("job_title_raw", pa.string()),
+        ("description", pa.string()),
+        ("core_job_title", pa.string()),
+        ("job_category", pa.string()),
+        ("seniority_level", pa.string()),
+        ("role_type", pa.string()),
+        ("workplace_type", pa.string()),
+        ("formatted_workplace_location", pa.string()),
+        ("workplace_countries", pa.string()),
+        ("min_industry_and_role_yoe", pa.float64()),
+        ("yearly_min_compensation", pa.float64()),
+        ("yearly_max_compensation", pa.float64()),
+        ("listed_compensation_currency", pa.string()),
+        ("technical_tools", pa.string()),
+        ("estimated_publish_date", pa.string()),
+        ("company_name", pa.string()),
+        ("company_website", pa.string()),
+        ("enriched_status", pa.string()),
+        ("nb_employees", pa.int64()),
+        ("year_founded", pa.int64()),
+        ("latitude", pa.float64()),
+        ("longitude", pa.float64()),
+        ("job_information_json", pa.string()),
+        ("v5_processed_job_data_json", pa.string()),
+        ("enriched_company_data_json", pa.string()),
+    ]
+)
 
 DUCKDB_DDL = """
 CREATE TABLE jobs (
@@ -211,6 +216,7 @@ _RID_INDEX = COLUMNS.index("requisition_id")
 # msgspec engine (Python mirror of the fastingest pipeline)
 # --------------------------------------------------------------------------
 
+
 def _parse_file(path_str: str) -> tuple[tuple | None, str | None]:
     """gunzip + decode + flatten one file; returns (row, None) or (None, err).
 
@@ -283,9 +289,7 @@ def run_msgspec_ingest(
     parquet_path = out_dir / "jobs.parquet"
     manifest_path = out_dir / "ingest_manifest.json"
 
-    files = sorted(
-        p for p in json_dir.iterdir() if p.name.endswith(".json.gz")
-    )
+    files = sorted(p for p in json_dir.iterdir() if p.name.endswith(".json.gz"))
     if limit:
         files = files[:limit]
 
@@ -306,6 +310,7 @@ def run_msgspec_ingest(
             return None
 
     stats_by_file = [stat(p) for p in files]
+
     def changed(i: int) -> bool:
         entry = old_manifest.get(files[i].name)
         if entry is None or stats_by_file[i] is None:
@@ -320,10 +325,13 @@ def run_msgspec_ingest(
     if workers > 1 and len(to_parse) > 1:
         chunksize = max(16, len(to_parse) // (workers * 8))
         with ProcessPoolExecutor(max_workers=workers) as ex:
-            results = list(ex.map(
-                _parse_file, (str(files[i]) for i in to_parse),
-                chunksize=chunksize,
-            ))
+            results = list(
+                ex.map(
+                    _parse_file,
+                    (str(files[i]) for i in to_parse),
+                    chunksize=chunksize,
+                )
+            )
     else:
         results = [_parse_file(str(files[i])) for i in to_parse]
     parse_sec = time.perf_counter() - t0
@@ -349,7 +357,9 @@ def run_msgspec_ingest(
                 stale_rids.append(old["requisition_id"])
             mtime_ns, size = stats_by_file[i]
             new_manifest[name] = {
-                "mtime_ns": mtime_ns, "size": size, "requisition_id": rid,
+                "mtime_ns": mtime_ns,
+                "size": size,
+                "requisition_id": rid,
             }
         rows.append(row)
 
@@ -387,6 +397,7 @@ def run_msgspec_ingest(
 # --------------------------------------------------------------------------
 # Rust engine (fastingest sidecar)
 # --------------------------------------------------------------------------
+
 
 def ensure_rust_binary() -> Path:
     """Build fastingest if the binary is missing or older than its sources."""
@@ -444,9 +455,8 @@ def run_fastingest(
 # Shared DuckDB load / Parquet export / benchmark report
 # --------------------------------------------------------------------------
 
-def load_duckdb(
-    table: pa.Table, db_path: Path, full: bool
-) -> tuple[float, int]:
+
+def load_duckdb(table: pa.Table, db_path: Path, full: bool) -> tuple[float, int]:
     """Upsert the (delta) Arrow table; returns (insert_sec, total_rows)."""
     if full:
         for suffix in ("", ".wal"):
@@ -477,8 +487,7 @@ def export_parquet(db_path: Path, parquet_path: Path) -> float:
     con = duckdb.connect(str(db_path), read_only=True)
     t0 = time.perf_counter()
     con.execute(
-        f"COPY jobs TO '{parquet_path.as_posix()}' "
-        f"(FORMAT PARQUET, COMPRESSION ZSTD)"
+        f"COPY jobs TO '{parquet_path.as_posix()}' (FORMAT PARQUET, COMPRESSION ZSTD)"
     )
     elapsed = time.perf_counter() - t0
     con.close()
@@ -487,30 +496,48 @@ def export_parquet(db_path: Path, parquet_path: Path) -> float:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--json-dir", type=Path, default='data/raw/json/')
-    parser.add_argument("--out-dir", type=Path, default='data/processed/')
-    parser.add_argument("--engine", choices=["msgspec", "rust"],
-                         default="msgspec",
-                         help="Parse/validate engine: msgspec Structs in "
-                              "Python (default) or the fastingest Rust "
-                              "sidecar.")
-    parser.add_argument("--workers", type=int, default=1,
-                         help="Parse with a ProcessPoolExecutor of N workers "
-                              "(msgspec engine only; default 1 = "
-                              "single-threaded).")
-    parser.add_argument("--limit", type=int, default=None,
-                         help="Only process the first N files (for quick runs).")
-    parser.add_argument("--full", action="store_true",
-                         help="Force a full rebuild (ignore the manifest and "
-                              "recreate both databases).")
-    parser.add_argument("--parquet", action="store_true",
-                         help="Also write <out-dir>/jobs.parquet (full corpus, "
-                              "zstd).")
+    parser.add_argument("--json-dir", type=Path, default="data/raw/json/")
+    parser.add_argument("--out-dir", type=Path, default="data/processed/")
+    parser.add_argument(
+        "--engine",
+        choices=["msgspec", "rust"],
+        default="msgspec",
+        help="Parse/validate engine: msgspec Structs in "
+        "Python (default) or the fastingest Rust "
+        "sidecar.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Parse with a ProcessPoolExecutor of N workers "
+        "(msgspec engine only; default 1 = "
+        "single-threaded).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Only process the first N files (for quick runs).",
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Force a full rebuild (ignore the manifest and recreate both databases).",
+    )
+    parser.add_argument(
+        "--parquet",
+        action="store_true",
+        help="Also write <out-dir>/jobs.parquet (full corpus, zstd).",
+    )
     args = parser.parse_args()
 
     if args.engine == "rust" and args.workers != 1:
-        print("note: --workers only applies to the msgspec engine; the Rust "
-              "sidecar always parses with all cores (rayon).", flush=True)
+        print(
+            "note: --workers only applies to the msgspec engine; the Rust "
+            "sidecar always parses with all cores (rayon).",
+            flush=True,
+        )
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
     sqlite_path = args.out_dir / "jobs.sqlite"
@@ -520,24 +547,41 @@ def main() -> None:
 
     # The engine output is a delta on incremental runs, so anything that
     # needs the full corpus (a missing DB) forces a full rebuild for everyone.
-    full = (args.full or not manifest_path.exists()
-            or not sqlite_path.exists() or not duckdb_path.exists())
+    full = (
+        args.full
+        or not manifest_path.exists()
+        or not sqlite_path.exists()
+        or not duckdb_path.exists()
+    )
 
-    engine_desc = ("fastingest (Rust)" if args.engine == "rust"
-                   else f"msgspec (Python, {args.workers} worker"
-                        f"{'s' if args.workers != 1 else ''})")
-    print(f"Parsing + validating with {engine_desc}, "
-          f"{'full rebuild' if full else 'incremental'}...", flush=True)
+    engine_desc = (
+        "fastingest (Rust)"
+        if args.engine == "rust"
+        else f"msgspec (Python, {args.workers} worker"
+        f"{'s' if args.workers != 1 else ''})"
+    )
+    print(
+        f"Parsing + validating with {engine_desc}, "
+        f"{'full rebuild' if full else 'incremental'}...",
+        flush=True,
+    )
     t0 = time.perf_counter()
     if args.engine == "rust":
         table, stats = run_fastingest(
-            args.json_dir, args.out_dir, args.limit, full,
+            args.json_dir,
+            args.out_dir,
+            args.limit,
+            full,
             parquet=args.parquet and full,
         )
     else:
         table, stats = run_msgspec_ingest(
-            args.json_dir, args.out_dir, args.limit, full,
-            parquet=args.parquet and full, workers=args.workers,
+            args.json_dir,
+            args.out_dir,
+            args.limit,
+            full,
+            parquet=args.parquet and full,
+            workers=args.workers,
         )
     for sample in stats.get("error_samples", []):
         print(f"    error: {sample}", flush=True)
@@ -545,28 +589,38 @@ def main() -> None:
     # else the engine does (Arrow handoff, full-run Parquet).
     parse_time = time.perf_counter() - t0 - stats["sqlite_insert_sec"]
     n_rows = table.num_rows
-    print(f"  {stats['files']} files: {stats['skipped']} unchanged (skipped), "
-          f"{stats['parsed']} parsed, {stats['errors']} validation errors",
-          flush=True)
+    print(
+        f"  {stats['files']} files: {stats['skipped']} unchanged (skipped), "
+        f"{stats['parsed']} parsed, {stats['errors']} validation errors",
+        flush=True,
+    )
     rate = f" ({n_rows / parse_time:.0f} rows/sec)" if n_rows else ""
     print(f"  parse + validate took {parse_time:.2f}s{rate}", flush=True)
 
     sqlite_time = stats["sqlite_insert_sec"]
-    print(f"SQLite (written by the {args.engine} engine): upserted {n_rows} "
-          f"rows in {sqlite_time:.2f}s, table now "
-          f"{stats['sqlite_total_rows']} rows", flush=True)
+    print(
+        f"SQLite (written by the {args.engine} engine): upserted {n_rows} "
+        f"rows in {sqlite_time:.2f}s, table now "
+        f"{stats['sqlite_total_rows']} rows",
+        flush=True,
+    )
 
     print("Loading into DuckDB...", flush=True)
     duckdb_time, duckdb_total = load_duckdb(table, duckdb_path, full)
-    print(f"  upserted {n_rows} rows in {duckdb_time:.2f}s, "
-          f"table now {duckdb_total} rows", flush=True)
+    print(
+        f"  upserted {n_rows} rows in {duckdb_time:.2f}s, "
+        f"table now {duckdb_total} rows",
+        flush=True,
+    )
 
     parquet_time = None
     if args.parquet:
         if full:
             parquet_time = 0.0  # written by the engine, inside parse_time
-            print(f"Parquet written by the {args.engine} engine "
-                  f"(full corpus).", flush=True)
+            print(
+                f"Parquet written by the {args.engine} engine (full corpus).",
+                flush=True,
+            )
         else:
             print("Exporting Parquet (full table via DuckDB)...", flush=True)
             parquet_time = export_parquet(duckdb_path, parquet_path)
@@ -579,29 +633,53 @@ def main() -> None:
         return f"{n_rows / t:.0f}" if n_rows and t > 0 else "-"
 
     print("\n" + "=" * 72, flush=True)
-    print(f"BENCHMARK SUMMARY (engine={args.engine}, "
-          f"{'full rebuild' if full else 'incremental'}: "
-          f"{n_rows} rows this run)", flush=True)
+    print(
+        f"BENCHMARK SUMMARY (engine={args.engine}, "
+        f"{'full rebuild' if full else 'incremental'}: "
+        f"{n_rows} rows this run)",
+        flush=True,
+    )
     print("=" * 72, flush=True)
     print(f"{'stage':<28}{'time (s)':>12}{'rows/sec':>15}{'file size':>15}", flush=True)
-    print(f"{'parse + validate':<28}{parse_time:>12.2f}{rows_per_sec(parse_time):>15}{'':>15}", flush=True)
-    print(f"{'sqlite insert':<28}{sqlite_time:>12.2f}{rows_per_sec(sqlite_time):>15}{sqlite_size:>13.1f}MB", flush=True)
-    print(f"{'duckdb insert':<28}{duckdb_time:>12.2f}{rows_per_sec(duckdb_time):>15}{duckdb_size:>13.1f}MB", flush=True)
+    print(
+        f"{'parse + validate':<28}{parse_time:>12.2f}{rows_per_sec(parse_time):>15}{'':>15}",
+        flush=True,
+    )
+    print(
+        f"{'sqlite insert':<28}{sqlite_time:>12.2f}{rows_per_sec(sqlite_time):>15}{sqlite_size:>13.1f}MB",
+        flush=True,
+    )
+    print(
+        f"{'duckdb insert':<28}{duckdb_time:>12.2f}{rows_per_sec(duckdb_time):>15}{duckdb_size:>13.1f}MB",
+        flush=True,
+    )
     if args.parquet and parquet_path.exists():
         parquet_size = parquet_path.stat().st_size / (1024 * 1024)
         t = parquet_time or 0.0
-        print(f"{'parquet export':<28}{t:>12.2f}{'-':>15}{parquet_size:>13.1f}MB", flush=True)
+        print(
+            f"{'parquet export':<28}{t:>12.2f}{'-':>15}{parquet_size:>13.1f}MB",
+            flush=True,
+        )
     total_sqlite = parse_time + sqlite_time
     total_duckdb = parse_time + duckdb_time
-    print(f"{'sqlite total (parse+load)':<28}{total_sqlite:>12.2f}{rows_per_sec(total_sqlite):>15}{'':>15}", flush=True)
-    print(f"{'duckdb total (parse+load)':<28}{total_duckdb:>12.2f}{rows_per_sec(total_duckdb):>15}{'':>15}", flush=True)
+    print(
+        f"{'sqlite total (parse+load)':<28}{total_sqlite:>12.2f}{rows_per_sec(total_sqlite):>15}{'':>15}",
+        flush=True,
+    )
+    print(
+        f"{'duckdb total (parse+load)':<28}{total_duckdb:>12.2f}{rows_per_sec(total_duckdb):>15}{'':>15}",
+        flush=True,
+    )
 
     if n_rows and duckdb_time > 0 and sqlite_time > 0:
         speedup = sqlite_time / duckdb_time
         faster = "DuckDB" if speedup >= 1 else "SQLite"
         factor = speedup if speedup >= 1 else 1 / speedup
-        print(f"\n{faster} was {factor:.2f}x faster than "
-              f"{'SQLite' if faster == 'DuckDB' else 'DuckDB'} for the insert stage.", flush=True)
+        print(
+            f"\n{faster} was {factor:.2f}x faster than "
+            f"{'SQLite' if faster == 'DuckDB' else 'DuckDB'} for the insert stage.",
+            flush=True,
+        )
 
     print("\nDONE", flush=True)
 

@@ -36,8 +36,7 @@ import re
 import sys
 import time
 from html.parser import HTMLParser
-from typing import Optional
-from urllib.parse import quote, urlparse, parse_qs
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 import typer
@@ -48,11 +47,25 @@ USER_AGENT = (
 )
 
 CSV_COLUMNS = [
-    "id", "requisition_id", "title", "company", "location", "workplace_type",
-    "commitment", "yearly_min_compensation", "yearly_max_compensation",
-    "compensation_currency", "compensation_frequency", "date_posted",
-    "source_ats", "board_token", "technical_tools", "requirements_summary",
-    "hiringcafe_url", "apply_url", "description_text",
+    "id",
+    "requisition_id",
+    "title",
+    "company",
+    "location",
+    "workplace_type",
+    "commitment",
+    "yearly_min_compensation",
+    "yearly_max_compensation",
+    "compensation_currency",
+    "compensation_frequency",
+    "date_posted",
+    "source_ats",
+    "board_token",
+    "technical_tools",
+    "requirements_summary",
+    "hiringcafe_url",
+    "apply_url",
+    "description_text",
 ]
 
 
@@ -62,8 +75,24 @@ class StaleBuildId(Exception):
 
 # ---------------------------------------------------------------- HTML -> text
 class _TextExtractor(HTMLParser):
-    BLOCK_TAGS = {"p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4",
-                  "h5", "h6", "tr", "table", "section", "article"}
+    BLOCK_TAGS = frozenset({
+        "p",
+        "div",
+        "br",
+        "li",
+        "ul",
+        "ol",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "tr",
+        "table",
+        "section",
+        "article",
+    })
 
     def __init__(self):
         super().__init__()
@@ -99,10 +128,12 @@ class Client:
     def __init__(self, delay: float):
         self.delay = delay
         self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": USER_AGENT,
-            "Accept": "application/json, text/html;q=0.9",
-        })
+        self.session.headers.update(
+            {
+                "User-Agent": USER_AGENT,
+                "Accept": "application/json, text/html;q=0.9",
+            }
+        )
         self._last_request = 0.0
 
     def get(self, url: str, retries: int = 3) -> requests.Response:
@@ -117,16 +148,18 @@ class Client:
                 if attempt == retries - 1:
                     raise
                 print(f"  ! {type(e).__name__}, retrying...", file=sys.stderr)
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
             if resp.status_code == 404:
                 raise StaleBuildId(url)
             if resp.status_code in (429, 403, 500, 502, 503):
                 if attempt == retries - 1:
                     resp.raise_for_status()
-                backoff = 5 * (2 ** attempt)
-                print(f"  ! HTTP {resp.status_code}, backing off {backoff}s...",
-                      file=sys.stderr)
+                backoff = 5 * (2**attempt)
+                print(
+                    f"  ! HTTP {resp.status_code}, backing off {backoff}s...",
+                    file=sys.stderr,
+                )
                 time.sleep(backoff)
                 continue
             resp.raise_for_status()
@@ -139,8 +172,10 @@ def get_build_id(client: Client) -> str:
     html = client.get(BASE + "/").text
     m = re.search(r'"buildId"\s*:\s*"([^"]+)"', html)
     if not m:
-        sys.exit("ERROR: could not find Next.js buildId on the homepage. "
-                 "The site structure may have changed.")
+        sys.exit(
+            "ERROR: could not find Next.js buildId on the homepage. "
+            "The site structure may have changed."
+        )
     return m.group(1)
 
 
@@ -157,7 +192,7 @@ def fetch_job_detail(client: Client, build_id: str, requisition_id: str):
     props = client.get(url).json().get("pageProps", {})
     canonical_url = ""
     if "__N_REDIRECT" in props:  # canonical slug redirect
-        path = props["__N_REDIRECT"]              # e.g. /job/title-company-city-<id>
+        path = props["__N_REDIRECT"]  # e.g. /job/title-company-city-<id>
         canonical_url = BASE + path
         slug = path.split("/job/", 1)[-1]
         url = f"{BASE}/_next/data/{build_id}/job/{quote(slug)}.json"
@@ -173,7 +208,11 @@ def _join(val):
 
 
 def flatten(hit: dict, detail: dict | None, canonical_url: str) -> dict:
-    v5 = (detail or hit).get("v5_processed_job_data") or hit.get("v5_processed_job_data") or {}
+    v5 = (
+        (detail or hit).get("v5_processed_job_data")
+        or hit.get("v5_processed_job_data")
+        or {}
+    )
     ji = (detail or hit).get("job_information") or {}
     return {
         "id": hit.get("id", ""),
@@ -199,13 +238,16 @@ def flatten(hit: dict, detail: dict | None, canonical_url: str) -> dict:
 
 
 # ------------------------------------------------------------------------ main
-def parse_search_state(query: Optional[str], url: Optional[str],
-                        search_state: Optional[str]) -> dict:
+def parse_search_state(
+    query: str | None, url: str | None, search_state: str | None
+) -> dict:
     if url:
         qs = parse_qs(urlparse(url).query)
         if "searchState" in qs:
             return json.loads(qs["searchState"][0])
-        print("WARNING: no searchState in --url; scraping default feed.", file=sys.stderr)
+        print(
+            "WARNING: no searchState in --url; scraping default feed.", file=sys.stderr
+        )
         return {}
     if search_state:
         return json.loads(search_state)
@@ -214,21 +256,40 @@ def parse_search_state(query: Optional[str], url: Optional[str],
     return {}
 
 
-app = typer.Typer(add_completion=False, help="Scrape job listings from hiringcafe.com", context_settings={"help_option_names": ["-h", "--help"]})
+app = typer.Typer(
+    add_completion=False,
+    help="Scrape job listings from hiringcafe.com",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
 
 
 @app.command()
 def main(
-    query: Optional[str] = typer.Option(None, "--query", help='keyword search, e.g. "software engineer"'),
-    url: Optional[str] = typer.Option(None, "--url", help="a hiringcafe.com URL with searchState (set filters in the UI, copy the URL)"),
-    search_state: Optional[str] = typer.Option(None, "--search-state", help="raw searchState JSON string"),
+    query: str | None = typer.Option(
+        None, "--query", help='keyword search, e.g. "software engineer"'
+    ),
+    url: str | None = typer.Option(
+        None,
+        "--url",
+        help="a hiringcafe.com URL with searchState (set filters in the UI, copy the URL)",
+    ),
+    search_state: str | None = typer.Option(
+        None, "--search-state", help="raw searchState JSON string"
+    ),
     max_jobs: int = typer.Option(40, "--max-jobs"),
     max_pages: int = typer.Option(25, "--max-pages"),
-    delay: float = typer.Option(1.0, "--delay", help="seconds between requests (default 1.0)"),
+    delay: float = typer.Option(
+        1.0, "--delay", help="seconds between requests (default 1.0)"
+    ),
     out: str = typer.Option("hiringcafe_jobs.csv", "--out"),
-    jsonl: Optional[str] = typer.Option(None, "--jsonl", help="also dump raw job JSON to this file"),
-    no_descriptions: bool = typer.Option(False, "--no-descriptions",
-                                          help="skip per-job detail fetches (much faster, no description text)"),
+    jsonl: str | None = typer.Option(
+        None, "--jsonl", help="also dump raw job JSON to this file"
+    ),
+    no_descriptions: bool = typer.Option(
+        False,
+        "--no-descriptions",
+        help="skip per-job detail fetches (much faster, no description text)",
+    ),
 ):
     if delay < 0.5:
         print("Refusing delay < 0.5s — be polite to their servers.", file=sys.stderr)
@@ -257,10 +318,13 @@ def main(
             hits = props.get("ssrHits") or []
             if page == 0:
                 print(f"  {props.get('ssrTotalCount', '?')} total jobs match")
-            new_hits = [h for h in hits
-                        if not h.get("is_hc_pinned")
-                        and h.get("requisition_id")
-                        and h.get("id") not in seen]
+            new_hits = [
+                h
+                for h in hits
+                if not h.get("is_hc_pinned")
+                and h.get("requisition_id")
+                and h.get("id") not in seen
+            ]
             print(f"  {len(hits)} hits, {len(new_hits)} new")
 
             for hit in new_hits:
@@ -271,21 +335,29 @@ def main(
                 if not no_descriptions:
                     try:
                         detail, canonical_url = fetch_job_detail(
-                            client, build_id, hit["requisition_id"])
+                            client, build_id, hit["requisition_id"]
+                        )
                     except StaleBuildId:
                         build_id = get_build_id(client)
                         detail, canonical_url = fetch_job_detail(
-                            client, build_id, hit["requisition_id"])
+                            client, build_id, hit["requisition_id"]
+                        )
                     except Exception as e:
-                        print(f"  ! detail fetch failed for {hit.get('id')}: {e}",
-                              file=sys.stderr)
+                        print(
+                            f"  ! detail fetch failed for {hit.get('id')}: {e}",
+                            file=sys.stderr,
+                        )
                 row = flatten(hit, detail, canonical_url)
                 rows.append(row)
                 if raw_dump:
-                    raw_dump.write(json.dumps(
-                        {"hit": hit, "detail": detail}, ensure_ascii=False) + "\n")
-                print(f"  [{len(rows)}/{max_jobs}] {row['title']} @ {row['company']}"
-                      f" (desc: {len(row['description_text'])} chars)")
+                    raw_dump.write(
+                        json.dumps({"hit": hit, "detail": detail}, ensure_ascii=False)
+                        + "\n"
+                    )
+                print(
+                    f"  [{len(rows)}/{max_jobs}] {row['title']} @ {row['company']}"
+                    f" (desc: {len(row['description_text'])} chars)"
+                )
 
             if props.get("ssrIsLastPage") or not new_hits:
                 print("  last page reached.")
@@ -303,8 +375,7 @@ def main(
         w.writerows(rows)
 
     with_desc = sum(1 for r in rows if len(r["description_text"]) > 100)
-    print(f"\nDone: {len(rows)} jobs -> {out}"
-          f" ({with_desc} with full descriptions)")
+    print(f"\nDone: {len(rows)} jobs -> {out} ({with_desc} with full descriptions)")
 
 
 if __name__ == "__main__":
