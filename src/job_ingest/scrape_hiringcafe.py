@@ -43,7 +43,6 @@ bulk crawling, so scrape only what you need.
 
 from __future__ import annotations
 
-import csv
 import gzip
 import hashlib
 import json
@@ -70,28 +69,6 @@ BASE = "https://hiringcafe.com"
 USER_AGENT = (
     "JobScout/1.0 (personal job search script; contact: alexander.wu7@gmail.com)"
 )
-
-CSV_COLUMNS = [
-    "id",
-    "requisition_id",
-    "title",
-    "company",
-    "location",
-    "workplace_type",
-    "commitment",
-    "yearly_min_compensation",
-    "yearly_max_compensation",
-    "compensation_currency",
-    "compensation_frequency",
-    "date_posted",
-    "source_ats",
-    "board_token",
-    "technical_tools",
-    "requirements_summary",
-    "hiringcafe_url",
-    "apply_url",
-    "description_text",
-]
 
 #: Where the dashboard stages newly scraped pages. Deliberately NOT the
 #: `data/raw/json` symlink the established ingest reads: the manifest is keyed
@@ -323,43 +300,25 @@ def fetch_job_detail(
     return (job if isinstance(job, dict) else None), canonical_url
 
 
-# ------------------------------------------------------------------ flattening
-def _join(val: Any) -> str:
-    if isinstance(val, list):
-        return "; ".join(str(v) for v in val)
-    return "" if val is None else str(val)
+# -------------------------------------------------------------- display summary
+def job_summary(
+    hit: dict[str, Any], detail: dict[str, Any] | None
+) -> tuple[str, str, str]:
+    """(title, company, description text) for one job -- display only.
 
-
-def flatten(
-    hit: dict[str, Any], detail: dict[str, Any] | None, canonical_url: str
-) -> dict[str, Any]:
-    v5 = (
-        (detail or hit).get("v5_processed_job_data")
-        or hit.get("v5_processed_job_data")
-        or {}
+    The raw page is the output of a scrape; this exists so a log line or a
+    TUI can say which job just landed, and how much description text came
+    with it, without re-deriving the shape of a job object. Everything here
+    comes from a job posting: treat it as untrusted text.
+    """
+    source = detail or hit
+    v5 = source.get("v5_processed_job_data") or hit.get("v5_processed_job_data") or {}
+    ji = source.get("job_information") or {}
+    return (
+        str(ji.get("title") or v5.get("core_job_title") or ""),
+        str(v5.get("company_name") or ""),
+        html_to_text(ji.get("description", "")),
     )
-    ji = (detail or hit).get("job_information") or {}
-    return {
-        "id": hit.get("id", ""),
-        "requisition_id": hit.get("requisition_id", ""),
-        "title": ji.get("title") or v5.get("core_job_title", ""),
-        "company": v5.get("company_name", ""),
-        "location": v5.get("formatted_workplace_location", ""),
-        "workplace_type": v5.get("workplace_type", ""),
-        "commitment": _join(v5.get("commitment")),
-        "yearly_min_compensation": v5.get("yearly_min_compensation", ""),
-        "yearly_max_compensation": v5.get("yearly_max_compensation", ""),
-        "compensation_currency": v5.get("listed_compensation_currency", ""),
-        "compensation_frequency": v5.get("listed_compensation_frequency", ""),
-        "date_posted": v5.get("estimated_publish_date", ""),
-        "source_ats": hit.get("source", ""),
-        "board_token": hit.get("board_token", ""),
-        "technical_tools": _join(v5.get("technical_tools")),
-        "requirements_summary": v5.get("requirements_summary", ""),
-        "hiringcafe_url": canonical_url,
-        "apply_url": (detail or {}).get("apply_url") or hit.get("hc_apply_url", ""),
-        "description_text": html_to_text(ji.get("description", "")),
-    }
 
 
 # --------------------------------------------------------- raw corpus writing
@@ -651,16 +610,16 @@ class ScrapeEvent:
     """One thing that happened, ready to render.
 
     `message` is already formatted for a log line. Treat it -- and every
-    string reachable through `row`, `hit` and `detail` -- as untrusted
-    display text: it comes from job postings.
+    string reachable through `hit` and `detail` -- as untrusted display
+    text: it comes from job postings.
     """
 
     kind: Literal["build_id", "page", "job", "warning", "done"]
     message: str
     index: int = 0
     total: int = 0
-    #: The flattened CSV row, on "job" events.
-    row: dict[str, Any] | None = None
+    #: The search hit and the detail page, verbatim, on "job" events. A
+    #: caller that wants structured fields reads them from these.
     hit: dict[str, Any] | None = None
     detail: dict[str, Any] | None = None
     #: Where the raw page was written, when raw_dir is configured.
@@ -678,10 +637,12 @@ def scrape(
     Callers should close it explicitly (``gen.close()`` in a ``finally``) so
     GeneratorExit runs deterministically instead of at GC time.
 
-    It performs no CSV or JSONL I/O -- collect `ev.row` for that -- but it
-    *does* write raw pages when `config.raw_dir` is set. Closing the
-    scrape->ingest loop is pipeline behaviour, not presentation, and the CLI
-    and the dashboard must not diverge on it.
+    The only thing it writes is the raw corpus: an ingest-compatible
+    ``{requisition_id}.json.gz`` page per job when `config.raw_dir` is set.
+    Closing the scrape->ingest loop is pipeline behaviour, not
+    presentation, and the CLI and the dashboard must not diverge on it. Any
+    other output is a caller's business -- `ev.hit` and `ev.detail` carry
+    the verbatim job objects.
 
     Pass a Client built with a cancellation Event to make a run stoppable.
     Cancellation is cooperative: a request already inside `requests` runs to
@@ -717,7 +678,7 @@ def _scrape(
         while warnings:
             yield ScrapeEvent("warning", warnings.popleft())
 
-    rows = 0
+    jobs = 0
     with_descriptions = 0
     seen: set[Any] = set()
     page = 0
@@ -727,7 +688,7 @@ def _scrape(
         yield from drain()
         yield ScrapeEvent("build_id", f"  buildId = {build_id}")
 
-        while rows < config.max_jobs and page < config.max_pages:
+        while jobs < config.max_jobs and page < config.max_pages:
             yield ScrapeEvent("page", f"Search page {page}...", index=page)
             try:
                 props = search_page(client, build_id, config.search_state, page)
@@ -756,20 +717,20 @@ def _scrape(
             yield ScrapeEvent("page", f"  {len(hits)} hits, {len(new_hits)} new")
 
             for hit in new_hits:
-                if rows >= config.max_jobs:
+                if jobs >= config.max_jobs:
                     break
                 if client.cancelled:
                     raise ScrapeCancelled("cancelled between jobs")
                 seen.add(hit.get("id"))
-                detail, canonical_url = None, ""
+                detail = None
                 if config.descriptions:
                     try:
-                        detail, canonical_url = fetch_job_detail(
+                        detail, _ = fetch_job_detail(
                             client, build_id, hit["requisition_id"]
                         )
                     except StaleBuildId:
                         build_id = get_build_id(client)
-                        detail, canonical_url = fetch_job_detail(
+                        detail, _ = fetch_job_detail(
                             client, build_id, hit["requisition_id"]
                         )
                     except ScrapeCancelled:
@@ -793,18 +754,16 @@ def _scrape(
                     else:
                         raw_path = write_raw_page(detail, config.raw_dir, hit=hit)
 
-                row = flatten(hit, detail, canonical_url)
-                rows += 1
-                description_chars = len(row["description_text"])
-                if description_chars > 100:
+                title, company, description = job_summary(hit, detail)
+                jobs += 1
+                if len(description) > 100:
                     with_descriptions += 1
                 yield ScrapeEvent(
                     "job",
-                    f"  [{rows}/{config.max_jobs}] {row['title']} @ {row['company']}"
-                    f" (desc: {description_chars} chars)",
-                    index=rows,
+                    f"  [{jobs}/{config.max_jobs}] {title} @ {company}"
+                    f" (desc: {len(description)} chars)",
+                    index=jobs,
                     total=config.max_jobs,
-                    row=row,
                     hit=hit,
                     detail=detail,
                     raw_path=raw_path,
@@ -817,16 +776,16 @@ def _scrape(
     except ScrapeCancelled:
         yield ScrapeEvent(
             "done",
-            f"Cancelled after the current request: {rows} jobs "
+            f"Cancelled after the current request: {jobs} jobs "
             f"({with_descriptions} with full descriptions)",
-            index=rows,
+            index=jobs,
             total=config.max_jobs,
         )
         return
     yield ScrapeEvent(
         "done",
-        f"Done: {rows} jobs ({with_descriptions} with full descriptions)",
-        index=rows,
+        f"Done: {jobs} jobs ({with_descriptions} with full descriptions)",
+        index=jobs,
         total=config.max_jobs,
     )
 
@@ -929,7 +888,6 @@ def main(
     delay: float = typer.Option(
         1.0, "--delay", help="seconds between requests (default 1.0)"
     ),
-    out: str = typer.Option("hiringcafe_jobs.csv", "--out"),
     jsonl: str | None = typer.Option(
         None, "--jsonl", help="also dump raw job JSON to this file"
     ),
@@ -976,27 +934,26 @@ def main(
     except ScrapeError as e:
         sys.exit(str(e))
 
-    rows: list[dict[str, Any]] = []
     raw_dump = None
     failure: str | None = None
     try:
         raw_dump = open(jsonl, "w", encoding="utf-8") if jsonl else None
         for event in events:
             print(event.message, flush=True)
-            if event.row is not None:
-                rows.append(event.row)
-                if raw_dump:
-                    raw_dump.write(
-                        json.dumps(
-                            {"hit": event.hit, "detail": event.detail},
-                            ensure_ascii=False,
-                        )
-                        + "\n"
+            if event.kind == "job" and raw_dump:
+                raw_dump.write(
+                    json.dumps(
+                        {"hit": event.hit, "detail": event.detail},
+                        ensure_ascii=False,
                     )
+                    + "\n"
+                )
     except KeyboardInterrupt:
-        print("\nInterrupted — writing what we have...")
+        # Whatever already reached disk stays: raw pages are written per
+        # job, and the JSONL dump is flushed on close.
+        print("\nInterrupted — keeping what has been written.")
     except ScrapeError as e:
-        # Partial results are still worth writing, but the exit code must
+        # Partial results are still worth keeping, but the exit code must
         # not claim success.
         failure = str(e)
     finally:
@@ -1005,11 +962,6 @@ def main(
         if raw_dump:
             raw_dump.close()
 
-    with open(out, "w", newline="", encoding="utf-8-sig") as f:
-        w = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
-        w.writeheader()
-        w.writerows(rows)
-    print(f"  -> {out}")
     if failure is not None:
         sys.exit(failure)
 

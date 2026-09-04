@@ -157,7 +157,7 @@ sidecar into DuckDB and is deleted after loading.
 # One of the four saved searches (see docs/saved_hiringcafe_searches.md).
 just scrape --preset DS_SF_Remote --max-jobs 100
 
-# Stage ingest-compatible raw pages alongside the CSV.
+# Stage ingest-compatible raw pages. Without --raw-dir a scrape only logs.
 just scrape --preset DA_Healthcare --max-jobs 50 --raw-dir data/raw/_json
 
 # Ad hoc: at most one of --query, --url, --search-state, --preset.

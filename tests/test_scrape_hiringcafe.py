@@ -297,7 +297,7 @@ class TestScrape:
         assert kinds.count("job") == 2
         jobs = [e for e in events if e.kind == "job"]
         assert jobs[0].index == 1 and jobs[0].total == 4
-        assert jobs[0].row is not None and jobs[0].hit is not None
+        assert jobs[0].hit is not None and jobs[0].detail is not None
 
     def test_max_jobs_is_honoured_across_pages(self) -> None:
         events = list(
@@ -313,9 +313,9 @@ class TestScrape:
 
         assert sum(1 for u in client.urls if "index.json" in u) == 2
 
-    def test_it_performs_no_csv_io(self, tmp_path: Path) -> None:
-        """Collecting ev.row is the caller's job, so main() keeps its
-        KeyboardInterrupt handling and partial results still get written."""
+    def test_it_writes_nothing_without_a_raw_dir(self, tmp_path: Path) -> None:
+        """The raw corpus is the only thing a scrape writes, and only when
+        it is asked to; anything else is the caller's business."""
         list(scrape(ScrapeConfig({}, max_jobs=2), StubClient()))
 
         assert list(tmp_path.iterdir()) == []
