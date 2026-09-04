@@ -11,31 +11,27 @@ interchangeable engines, selected with `--engine`:
 
 - **msgspec (default)** — the schema as `msgspec.Struct`s in
   `job_schema.py`; decode+validate in one C pass, in-process, pure-Python
-  packaging. **5.38 s** for the current corpus single-threaded, **2.07 s**
+  packaging. **5.56 s** for the current corpus single-threaded, **2.13 s**
   with `--workers 8`.
 - **rust** — the fastingest serde sidecar: **0.33 s** parse+validate, but needs a Rust
   toolchain.
 
 Both keep the same `ingest_manifest.json`, so you can switch engines
-between runs; a no-change incremental run is **~0.1–0.3 s** either way.
+between runs; a no-change incremental run takes **~0.55 s** with msgspec.
 
-## Benchmark (24,548 files; 23,904 valid rows; 644 validation errors)
+## Benchmark (24,548 files; 24,548 valid rows; 0 validation errors)
 
 | stage                     | msgspec (1 worker) | msgspec (8 workers) | Rust sidecar |
 |---------------------------|-------------------:|--------------------:|-------------:|
-| parse + validate          | 5.38 s             | 2.07 s              | **0.33 s**   |
-| SQLite insert             | 1.43 s             | 1.43 s              | 1.41 s       |
-| DuckDB insert             | 0.81 s             | 0.81 s              | 0.84 s       |
-| DuckDB total (parse+load) | 6.19 s             | 2.88 s              | **1.17 s**   |
-| incremental, no changes*  | ~0.72 s            | (not measured)      | **~0.02 s**  |
-
-*The 644 invalid files are deliberately retried on each incremental run, so
-this is not a literal zero-parse run. All current failures are missing the
-required `__N_SSG` field.
+| parse + validate          | 5.56 s             | 2.13 s              | **0.33 s**   |
+| SQLite insert             | 1.50 s             | 1.51 s              | 1.47 s       |
+| DuckDB insert             | 0.86 s             | 0.93 s              | 0.85 s       |
+| DuckDB total (parse+load) | 6.42 s             | 3.06 s              | **1.18 s**   |
+| incremental, no changes   | ~0.55 s            | (not measured)      | **<0.01 s**  |
 
 Measurements are full rebuilds on the current 198 MB compressed corpus.
-The Rust parse time is the sidecar's reported parse+validate time; its total
-adds the SQLite and DuckDB loads. DuckDB's insert dropped ~3x vs the original
+The Rust parse and incremental times are the sidecar's reported processing
+times; its full total adds the SQLite and DuckDB loads. DuckDB's insert dropped ~3x vs the original
 because it bulk-ingests a columnar Arrow table instead of row-wise
 `executemany`; the SQLite insert happens inside whichever engine parsed
 (rusqlite in the sidecar, stdlib `sqlite3` `executemany` in the msgspec
@@ -186,10 +182,9 @@ would populate the two databases from different code paths.
   `job_schema.py` classes or blob key order silently changes — the parity
   checker asserts key order to catch this.
 - serde and msgspec are both stricter than Pydantic's lax mode (e.g. no
-  `"5"` → 5.0, no naive datetimes). The current corpus has 644 files
-  missing required `__N_SSG`; they are reported and retried on later runs.
-  If that field is legitimately optional in the source, add a targeted shim
-  (`deserialize_with` in Rust, a `__post_init__` fixup in Python).
+  `"5"` → 5.0, no naive datetimes). The top-level static-generation marker
+  may be named either `__N_SSG` or `__N_SSP`; the schema requires one of
+  those two fields.
 - msgspec `kw_only=True` is **not inherited** by fields declared on
   subclasses of a configured base Struct — it must be repeated on every
   class, or required-after-optional field orders raise at import.

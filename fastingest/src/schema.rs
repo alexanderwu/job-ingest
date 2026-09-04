@@ -340,7 +340,7 @@ pub struct PageProps {
 pub struct JobPage {
     #[serde(rename = "pageProps")]
     pub page_props: PageProps,
-    #[serde(rename = "__N_SSG")]
+    #[serde(rename = "__N_SSG", alias = "__N_SSP")]
     #[allow(dead_code)]
     pub n_ssg: bool,
 }

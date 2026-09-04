@@ -6,6 +6,7 @@ payload) describing a single job listing scraped from a job board.
 
 Derived from the observed structure:
     {pageProps: {job: {...}}, __N_SSG: true}
+    # Some newer exports use __N_SSP instead.
 
 This module is the Python source of truth shared by ingest_and_benchmark.py
 (the default msgspec engine) and verify_parity.py (the Rust-parity check):
@@ -261,7 +262,12 @@ class JobPage(_Struct, kw_only=True):
     """Top-level schema for a single decompressed data/raw/json/*.json.gz file."""
 
     pageProps: PageProps
-    N_SSG: bool = msgspec.field(name="__N_SSG")
+    N_SSG: bool | None = msgspec.field(name="__N_SSG", default=None)
+    N_SSP: bool | None = msgspec.field(name="__N_SSP", default=None)
+
+    def __post_init__(self) -> None:
+        if self.N_SSG is None and self.N_SSP is None:
+            raise ValueError("Object missing required field `__N_SSG` or `__N_SSP`")
 
 
 _decoder = msgspec.json.Decoder(JobPage)
