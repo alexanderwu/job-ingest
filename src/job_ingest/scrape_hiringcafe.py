@@ -978,6 +978,7 @@ def main(
 
     rows: list[dict[str, Any]] = []
     raw_dump = None
+    failure: str | None = None
     try:
         raw_dump = open(jsonl, "w", encoding="utf-8") if jsonl else None
         for event in events:
@@ -995,7 +996,9 @@ def main(
     except KeyboardInterrupt:
         print("\nInterrupted — writing what we have...")
     except ScrapeError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        # Partial results are still worth writing, but the exit code must
+        # not claim success.
+        failure = str(e)
     finally:
         # Explicit close so GeneratorExit runs here rather than at GC time.
         events.close()
@@ -1007,6 +1010,8 @@ def main(
         w.writeheader()
         w.writerows(rows)
     print(f"  -> {out}")
+    if failure is not None:
+        sys.exit(failure)
 
 
 if __name__ == "__main__":
