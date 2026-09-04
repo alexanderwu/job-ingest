@@ -12,8 +12,9 @@ Today the repo has two disconnected CLIs and no way to see what's actually in th
   data, so nothing can be rendered anywhere but stdout.
 
 The goal is a single pane that both *operates* the pipeline (run scrape/ingest,
-watch progress, cancel) and *explains* the corpus (counts, fill rates,
-breakdowns, compensation, recency, row browsing).
+watch progress, cancel, launch one of the four established HiringCafe searches)
+and *explains* the corpus (counts, fill rates, breakdowns, compensation,
+recency, row browsing).
 
 **Why Textual over Streamlit/marimo.** The work splits roughly evenly between
 operating and exploring, and the UI must stay inside `just check`. Streamlit and
@@ -62,6 +63,11 @@ shell and a second frontend later is cheap.
   This is an explicit privacy tradeoff; do not silently scrub or transform them.
 - The dashboard permits only one pipeline operation (scrape or ingest) at a
   time.
+- The scraper exposes the four searches in
+  [`saved_hiringcafe_searches.md`](saved_hiringcafe_searches.md) as named
+  presets, while retaining a Custom option for an ad hoc query, URL, or raw
+  `searchState`. A run executes exactly one preset; multi-preset batch runs and
+  cross-search result merging are not implicit dashboard behavior.
 - Corpus views default to active jobs (`is_expired IS NOT TRUE`). The overview
   still shows total, active, and expired counts, and Browse offers an explicit
   "include expired" toggle.
@@ -399,6 +405,52 @@ resolved absolute path before starting. Do not call this directory the active
 corpus and do not default it to the `data/raw/json` symlink. The known
 source-directory discrepancy at the top of this plan applies.
 
+**4e. Saved-search registry.** Add a small typed registry (in
+`scrape_hiringcafe.py`, or a sibling `saved_searches.py` if keeping the scraper
+focused) containing the four URLs from
+[`saved_hiringcafe_searches.md`](saved_hiringcafe_searches.md). Store the exact
+URLs and obtain a fresh `search_state` through `parse_search_state()` when a
+run starts; do not hand-maintain a second, potentially drifting interpretation
+of the encoded JSON. The Markdown file is the human-readable provenance, while
+the packaged Python registry is the runtime source so `job-dash` does not
+depend on the repository's `docs/` directory being present after installation.
+
+```python
+@dataclass(frozen=True, slots=True)
+class SavedSearch:
+    key: str
+    label: str
+    url: str
+    summary: str
+
+SAVED_SEARCHES: tuple[SavedSearch, ...] = (...)
+
+def saved_search(key: str) -> SavedSearch: ...
+```
+
+Preserve the saved names as stable keys and expose clearer labels/summaries in
+the UI. The exact decoded distinctions are:
+
+| Key | Role filter | Geography/workplace | Industry | Age |
+| --- | --- | --- | --- | --- |
+| `DS_SF_Remote` | Data/ML title expression, excluding software/electrical engineer | SF within 100 miles **or** US remote | Any | 1,440 days |
+| `DA_SF_Remote` | `Data and Analytics` department | SF within 100 miles **or** US remote | Any | 1,440 days |
+| `DS_Healthcare` | Same Data/ML title expression | SF within 100 miles **or** US remote/onsite/hybrid | Biotechnology or healthcare | 1,440 days |
+| `DA_Healthcare` | `Data and Analytics` department | SF within 100 miles **or** US remote | Biotechnology or healthcare | 1,440 days |
+
+All four also retain their saved 1,440-day window, full-time/contract,
+transparent-salary, 0–6-years, individual-contributor, and
+doctorate-preferred/not-mentioned filters. Keep that age window consistent
+across the registry, and do not broaden `DA_Healthcare` to onsite/hybrid: those
+are the values in the supplied URLs.
+
+Add `--preset KEY` to the CLI. It is mutually exclusive with `--query`,
+`--url`, and `--search-state`; reject ambiguous combinations with
+`ScrapeError`, list valid keys for an unknown preset, and keep the current
+default-feed behavior when none of the four input modes is supplied. Resolve
+the preset before constructing `ScrapeConfig`, so the core generator continues
+to accept only a concrete `search_state` and stays unaware of UI/CLI naming.
+
 ## Step 5 — `src/job_ingest/dashboard.py` + `dashboard.tcss` (new)
 
 **One screen, `TabbedContent` with three tabs** bound to `1`/`2`/`3`, plus
@@ -409,10 +461,11 @@ mounted — a running scrape keeps filling its log while you browse data.
   companies, active date range, DB sizes, manifest entry count and age) over a
   `VerticalScroll` of active-job breakdown panels.
 - **Run** — Ingest panel (`Checkbox` full/parquet, `Input` limit, Run), Scrape
-  panel (`Input` query/url/max-jobs/max-pages/delay, `Checkbox` "write raw pages",
-  Run), one shared `RichLog`, a `ProgressBar`, Cancel, and a summary `Static`
-  fed from `IngestResult`. Show the resolved scrape-output and ingest-input
-  paths together because they intentionally differ for now.
+  panel (saved-search `Select`, Custom query/URL/raw-JSON inputs,
+  `Input` max-jobs/max-pages/delay, `Checkbox` "write raw pages", Run), one
+  shared `RichLog`, a `ProgressBar`, Cancel, and a summary `Static` fed from
+  `IngestResult`. Show the resolved scrape-output and ingest-input paths
+  together because they intentionally differ for now.
 - **Browse** — search `Input`, "include expired" checkbox, `DataTable`, detail
   `Static`, "showing X–Y of N", and explicit Previous/Next buttons. Search and
   analytics default to active jobs.
@@ -481,6 +534,17 @@ Treat all job-originated strings as untrusted display text. Do not enable Rich
 markup for titles, companies, descriptions, or log messages derived from the
 site.
 
+**Saved-search UX:** populate the `Select` in registry order with the four
+friendly labels followed by `Custom`. Default to `DS_SF_Remote`, show its
+human-readable summary below the selector, and log the stable key plus summary
+at run start (never the multi-kilobyte encoded URL). Selecting a preset disables
+the three Custom inputs and uses its exact decoded state. Selecting `Custom`
+enables them and applies the same precedence/validation as the CLI, with at most
+one of query, URL, or raw JSON non-empty. Changing the selector during a run is
+disabled along with the other scrape controls. Do not offer an "All" choice in
+this iteration: it would require separate per-search progress, deduplication,
+partial-failure, and output semantics.
+
 **mypy-strict checklist:** `class Dashboard(App[None])`; explicit
 `reactive[T]` annotations, no callable defaults; `-> None` on every
 `on_*`/`watch_*`/`action_*`; always two-arg `query_one("#id", DataTable)` (the
@@ -527,6 +591,15 @@ and a second write overwrites cleanly. `scrape()` drained against a stub
 `Client`: event sequence, warning routing, `ScrapeError`, cleanup, and
 `max_jobs` honoured.
 
+Also assert that the registry has exactly the four stable keys, each URL parses
+to the expected distinguishing fields in the table above, and repeated
+resolution returns equal but independently owned `search_state` dictionaries.
+Cover CLI/input resolution for preset vs. Custom mutual exclusion and unknown
+keys. As a repository-only drift guard, parse the four headings/URLs in
+`docs/saved_hiringcafe_searches.md` and assert they exactly match the packaged
+registry; this keeps edits to the human source from silently diverging from the
+installed app.
+
 **The test that proves the formats compose** (`@needs_sidecar`): read
 `fastingest/tests/fixtures/no_enrichment.json.gz` → `["pageProps"]["job"]` →
 round-trip through `write_raw_page` into an empty `tmp_path` →
@@ -566,6 +639,9 @@ rows. Assert wiring, not pixels:
 7. While either worker is active both Run buttons are disabled; Cancel is
    enabled only for scrape, and a second operation cannot start.
 8. Browse excludes expired rows by default and the toggle includes them.
+9. The scrape selector contains the four stable presets plus Custom; selecting
+   each preset displays its summary and the worker receives its exact decoded
+   state, while Custom enables its inputs and rejects multiple input modes.
 
 **Extend `tests/test_ingest_and_benchmark.py`** with a `TestRunIngest`
 (`@needs_sidecar`) asserting `IngestResult` fields over the fixtures (`ok == 7`,
@@ -587,10 +663,11 @@ separately show that the current default ingest still reads the
 loop, until the source-directory discrepancy is reconciled;
 add a Dashboard section (three panes, keybindings, no screenshot — it's a TUI);
 add `stats.py` and `dashboard.py` to Components; add `just dash` to Usage;
-document the `--raw-dir` + `--no-descriptions` incompatibility and the symlink
-caveat; add a Development note on the `asyncio.run()` test pattern and why
+document the four `--preset` keys, the dashboard's one-search-per-run behavior,
+the `--raw-dir` + `--no-descriptions` incompatibility, and the symlink caveat;
+add a Development note on the `asyncio.run()` test pattern and why
 pytest-asyncio is deliberately absent. Update the scraper module docstring's
-usage block.
+usage block with a preset example.
 
 ## Ordering
 
@@ -615,6 +692,9 @@ Step 4a (the spike) gates step 4.
   does; verify `.ingest-incomplete` remains and the next run forces full.
 - Step 4 end-to-end: `job-scrape --max-jobs 2 --raw-dir <tmp>` then
   `job-ingest --json-dir <tmp> --out-dir <tmp>` → `ok == 2`.
+- Step 4 preset smoke test: run `job-scrape --preset DS_SF_Remote --max-jobs 2`
+  and confirm the first-page request contains the exact saved state; do not
+  exercise all four live URLs in the automated gate.
 - Step 5 manual: `just dash` against the real corpus — overview populates,
   ingest runs and streams to the log then refreshes stats, browse pages through
   active rows by default, scrape runs and cancels after its current request, and
@@ -630,6 +710,8 @@ Step 4a (the spike) gates step 4.
   the `data/raw/json` symlink. The path mismatch remains visible and documented.
 - Preserve raw job objects verbatim, including Firebase user-activity UIDs.
 - Run only one scrape or ingest operation at a time.
+- Ship the four named HiringCafe presets with both CLI and dashboard access;
+  run one preset at a time and preserve their encoded filters exactly.
 - Default corpus queries and Browse to active jobs; make expired inclusion
   explicit and show all three counts in Overview.
 
@@ -644,5 +726,7 @@ Step 4a (the spike) gates step 4.
 - **Silently merging or alternating `data/raw/json` and `data/raw/_json`** — the
   manifest namespace is filename-only, so source reconciliation needs its own
   design.
+- **An implicit "run all saved searches" batch** — overlapping results require
+  explicit deduplication, progress, output, and partial-failure contracts.
 - **New deps `pytest-asyncio`, `pytest-timeout`, `plotext`, `pandas`** — the
   first is verified unnecessary, the rest are avoidable.
