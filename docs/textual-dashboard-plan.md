@@ -123,17 +123,30 @@ assertion still holds. Call this out in the commit message.
 @dataclass(frozen=True, slots=True)
 class IngestResult:
     full: bool
-    files: int; skipped: int; parsed: int; ok: int; errors: int
+    files: int
+    skipped: int
+    parsed: int
+    ok: int
+    errors: int
     error_samples: tuple[str, ...]
     parse_sec: float
-    sqlite_insert_sec: float; sqlite_total_rows: int
-    duckdb_insert_sec: float; duckdb_total_rows: int
+    sqlite_insert_sec: float
+    sqlite_total_rows: int
+    duckdb_insert_sec: float
+    duckdb_total_rows: int
     parquet_sec: float | None
-    sqlite_bytes: int; duckdb_bytes: int; parquet_bytes: int | None
+    sqlite_bytes: int
+    duckdb_bytes: int
+    parquet_bytes: int | None
+
 
 def run_ingest(
-    json_dir: Path, out_dir: Path, *,
-    limit: int | None = None, full: bool = False, parquet: bool = False,
+    json_dir: Path,
+    out_dir: Path,
+    *,
+    limit: int | None = None,
+    full: bool = False,
+    parquet: bool = False,
     on_event: Callable[[str], None] = lambda _msg: None,
 ) -> IngestResult: ...
 ```
@@ -192,6 +205,7 @@ class StatsUnavailable(RuntimeError):
     """Corpus DB missing, or locked by another process. DuckDB allows either one
     read-write process or N read-only ones, so a running ingest -- or a stray
     `duckdb` CLI -- makes reads fail."""
+
 
 @contextmanager
 def _read_only(db_path: Path) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -308,21 +322,28 @@ moved, the feature changes shape and you want to know now.
 @dataclass(frozen=True, slots=True)
 class ScrapeConfig:
     search_state: dict[str, Any]
-    max_jobs: int = 40; max_pages: int = 25; delay: float = 1.0
+    max_jobs: int = 40
+    max_pages: int = 25
+    delay: float = 1.0
     descriptions: bool = True
     raw_dir: Path | None = None
+
 
 @dataclass(frozen=True, slots=True)
 class ScrapeEvent:
     kind: Literal["build_id", "page", "job", "warning", "done"]
-    message: str                       # ready to print
-    index: int = 0; total: int = 0     # for a ProgressBar
+    message: str  # ready to print
+    index: int = 0
+    total: int = 0  # for a ProgressBar
     row: dict[str, Any] | None = None  # flattened CSV row
     hit: dict[str, Any] | None = None
     detail: dict[str, Any] | None = None
     raw_path: Path | None = None
 
-def scrape(config: ScrapeConfig, client: Client | None = None) -> Iterator[ScrapeEvent]: ...
+
+def scrape(
+    config: ScrapeConfig, client: Client | None = None
+) -> Iterator[ScrapeEvent]: ...
 ```
 
 Add `class ScrapeError(RuntimeError)`. Library code must never call `sys.exit()`
@@ -364,8 +385,10 @@ def raw_filename(requisition_id: str) -> str | None:
     not the ingest key (requisition_id inside the JSON is), so mangling costs
     only readability."""
 
-def write_raw_page(detail: dict[str, Any], raw_dir: Path, *,
-                   hit: dict[str, Any] | None = None) -> Path | None: ...
+
+def write_raw_page(
+    detail: dict[str, Any], raw_dir: Path, *, hit: dict[str, Any] | None = None
+) -> Path | None: ...
 ```
 
 Payload is exactly `{"pageProps": {"job": detail}, "__N_SSG": True}`.
@@ -423,7 +446,9 @@ class SavedSearch:
     url: str
     summary: str
 
-SAVED_SEARCHES: tuple[SavedSearch, ...] = (...)
+
+SAVED_SEARCHES: tuple[SavedSearch, ...] = ...
+
 
 def saved_search(key: str) -> SavedSearch: ...
 ```
@@ -612,6 +637,7 @@ loudly if `schema.rs` drifts.
 ```python
 def test_dashboard_mounts(tmp_path: Path) -> None:
     asyncio.run(_drive_mount(tmp_path))
+
 
 async def _drive_mount(tmp_path: Path) -> None:
     app = Dashboard(db_path=..., out_dir=...)

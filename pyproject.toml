@@ -8,19 +8,17 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "aw",
     "duckdb>=1.5.4",
-    "lmstudio>=1.5.0",
-    "markdown>=3.10.2",
     "pyarrow>=25.0.0",
     "requests>=2.34.2",
-    "streamlit>=1.59.1",
+    "textual>=8.2.8",
     "typer>=0.27.0",
 ]
 
 [project.scripts]
 job-ingest = "job_ingest.ingest_and_benchmark:main"
 job-scrape = "job_ingest.scrape_hiringcafe:app"
+job-dash = "job_ingest.dashboard:main"
 
 [build-system]
 requires = ["uv_build>=0.11.26,<0.12.0"]
@@ -33,8 +31,11 @@ dev = [
     "ruff>=0.15.22",
 ]
 
-[tool.uv.sources]
-aw = { git = "https://github.com/alexanderwu/aw.git" }
+[tool.ruff.lint]
+# Ruff's historical default rule set, pinned explicitly. Newer ruff releases
+# widen the implicit default, which would otherwise change what `just check`
+# enforces on an unrelated dependency bump.
+select = ["E4", "E7", "E9", "F"]
 
 [tool.mypy]
 # `just typecheck` runs bare `mypy`, so the targets have to live here.

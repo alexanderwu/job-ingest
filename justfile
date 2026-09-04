@@ -8,13 +8,13 @@ default:
 scrape *args:
     uv run src/job_ingest/scrape_hiringcafe.py {{ args }}
 
-# Run Streamlit app
-# stream *args:
-#     streamlit run streamlit/streamlit_app.py {{ args }}
-
 # Ingest
 ingest *args:
     uv run src/job_ingest/ingest_and_benchmark.py {{ args }}
+
+# Run the Textual dashboard
+dash *args:
+    uv run src/job_ingest/dashboard.py {{ args }}
 
 # Create/update the virtualenv with the pinned Python and all dependencies.
 install:
