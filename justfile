@@ -20,9 +20,23 @@ ingest *args:
 install:
     uv sync
 
-# Run the test suite.
+# Run the test suite (Python wrapper + Rust sidecar).
 test *args:
     uv run pytest {{ args }}
+    cd fastingest && cargo test
+
+# Python tests only.
+test-py *args:
+    uv run pytest {{ args }}
+
+# Rust tests only.
+test-rs *args:
+    cd fastingest && cargo test {{ args }}
+
+# Re-record the golden snapshots after an intentional schema change.
+# Review the resulting diff carefully before committing.
+bless:
+    cd fastingest && BLESS=1 cargo test --test golden
 
 # Format code in place.
 fmt:
@@ -36,9 +50,16 @@ lint:
 typecheck:
     uv run mypy
 
+# Static check the Rust sidecar.
+clippy:
+    cd fastingest && cargo clippy --all-targets -- -D warnings
+
 # Run the full CI gate locally: format check, lint, typecheck, tests.
 check:
     uv run ruff format --check .
     uv run ruff check .
     uv run mypy
     uv run pytest
+    cd fastingest && cargo fmt --check
+    cd fastingest && cargo clippy --all-targets -- -D warnings
+    cd fastingest && cargo test

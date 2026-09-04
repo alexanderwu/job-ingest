@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-# /// script
-# requires-python = ">=3.12"
-# dependencies = ["duckdb>=1.0", "pyarrow>=17"]
-# ///
 """
 Ingest *.json.gz job listings into DuckDB and SQLite, incrementally, and
 benchmark load performance across the two backends.
@@ -19,10 +15,12 @@ manifest, SQLite, or DuckDB file is missing. Deleted input files are
 ignored: their rows linger until the next full run.
 
 Usage:
-    uv run ingest_and_benchmark.py \
+    uv run src/job_ingest/ingest_and_benchmark.py \
         --json-dir /path/to/json_dir \
         --out-dir /path/to/output_dir \
         [--limit 2000] [--full] [--parquet]
+
+    or, equivalently: just ingest [--limit 2000] [--full] [--parquet]
 
 Outputs:
     <out-dir>/jobs.duckdb
@@ -32,8 +30,15 @@ Outputs:
     A benchmark summary printed to stdout.
 
 Design notes:
-    - Parsing and validation is done once and shared by both backends, so
-      the DB-load benchmark isolates database write performance.
+    - Parsing and validation happen once and are shared by both backends, so
+      the per-stage timings below exclude JSON/validation overhead.
+    - The SQLite and DuckDB insert timings are NOT a like-for-like
+      comparison and no winner is declared: SQLite is written row-wise by
+      rusqlite inside the sidecar, while DuckDB bulk-registers an Arrow
+      table from Python. They measure two different strategies in two
+      different languages, one of them across a subprocess boundary. Read
+      them as "what each stage costs in this pipeline", not as a benchmark
+      of the two engines against each other.
     - Both DBs key on requisition_id and are fed with INSERT OR REPLACE, so
       incremental runs are idempotent upserts.
     - With --parquet: on full runs the sidecar writes jobs.parquet directly
@@ -57,18 +62,32 @@ import sys
 import time
 from pathlib import Path
 
-import pyarrow as pa  # type: ignore[import-untyped]
-import pyarrow.ipc  # type: ignore[import-untyped]
+from typing import Any
+
+import pyarrow as pa
+import pyarrow.ipc
 
 import duckdb
 
-CRATE_DIR = Path(__file__).resolve().parents[2] / "fastingest"
-RUST_BIN = (
-    CRATE_DIR
-    / "target"
-    / "release"
-    / ("fastingest.exe" if os.name == "nt" else "fastingest")
-)
+BIN_NAME = "fastingest.exe" if os.name == "nt" else "fastingest"
+
+
+def find_crate_dir() -> Path | None:
+    """Locate the fastingest crate, or None if this is an installed copy.
+
+    $FASTINGEST_DIR wins; otherwise walk up from this file looking for
+    fastingest/Cargo.toml. Walking up (rather than a fixed parents[N]) keeps
+    this working from the src/ layout, from a checkout nested one level
+    deeper, and from a tests/ subdirectory -- and correctly finds nothing
+    when the package is installed into site-packages without the crate.
+    """
+    if env_dir := os.environ.get("FASTINGEST_DIR"):
+        return Path(env_dir)
+    for parent in Path(__file__).resolve().parents:
+        if (parent / "fastingest" / "Cargo.toml").is_file():
+            return parent / "fastingest"
+    return None
+
 
 DUCKDB_DDL = """
 CREATE TABLE jobs (
@@ -110,19 +129,37 @@ CREATE TABLE jobs (
 
 
 def ensure_rust_binary() -> Path:
-    """Build fastingest if the binary is missing or older than its sources."""
-    sources = list(CRATE_DIR.glob("src/*.rs")) + [CRATE_DIR / "Cargo.toml"]
-    src_mtime = max(p.stat().st_mtime for p in sources)
-    if RUST_BIN.exists() and RUST_BIN.stat().st_mtime >= src_mtime:
-        return RUST_BIN
+    """Locate fastingest, rebuilding it if it is missing or stale.
+
+    Falls back to an installed `fastingest` on PATH when the crate source
+    isn't alongside this file (e.g. the package installed on its own).
+    """
+    crate_dir = find_crate_dir()
+    if crate_dir is None or not crate_dir.is_dir():
+        if on_path := shutil.which("fastingest"):
+            return Path(on_path)
+        sys.exit(
+            "fastingest crate not found and no `fastingest` on PATH. Run from "
+            "a checkout, or set FASTINGEST_DIR to the crate directory."
+        )
+
+    binary = crate_dir / "target" / "release" / BIN_NAME
+    sources = list(crate_dir.rglob("src/**/*.rs")) + [crate_dir / "Cargo.toml"]
+    src_mtime = max((p.stat().st_mtime for p in sources), default=0.0)
+    if binary.exists() and binary.stat().st_mtime >= src_mtime:
+        return binary
     if shutil.which("cargo") is None:
+        if on_path := shutil.which("fastingest"):
+            return Path(on_path)
         sys.exit(
             f"fastingest binary missing/stale and cargo not found; run "
-            f"`cargo build --release` in {CRATE_DIR}"
+            f"`cargo build --release` in {crate_dir}"
         )
     print("Building fastingest (cargo build --release)...", flush=True)
-    subprocess.run(["cargo", "build", "--release"], cwd=CRATE_DIR, check=True)
-    return RUST_BIN
+    subprocess.run(["cargo", "build", "--release"], cwd=crate_dir, check=True)
+    if not binary.exists():
+        sys.exit(f"cargo build succeeded but {binary} is missing")
+    return binary
 
 
 def run_fastingest(
@@ -131,7 +168,7 @@ def run_fastingest(
     limit: int | None,
     full: bool,
     parquet: bool,
-) -> tuple[pa.Table, dict]:
+) -> tuple[pa.Table, dict[str, Any]]:
     """Run the fastingest sidecar and load its (delta) Arrow output.
 
     Returns the Arrow table of rows parsed this run plus the sidecar's stats
@@ -147,8 +184,22 @@ def run_fastingest(
     if parquet:
         cmd += ["--parquet"]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    stats = json.loads(proc.stdout.strip().splitlines()[-1])
+    # check=False: CalledProcessError doesn't carry stderr in its message, so
+    # a fatal sidecar error would otherwise surface as a bare traceback with
+    # the actual diagnostic swallowed by capture_output.
+    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        sys.exit(
+            f"fastingest failed (exit {proc.returncode}):\n"
+            f"{proc.stderr.strip() or '<no stderr>'}"
+        )
+    lines = proc.stdout.strip().splitlines()
+    if not lines:
+        sys.exit(
+            f"fastingest produced no stats line on stdout.\n"
+            f"stderr: {proc.stderr.strip() or '<empty>'}"
+        )
+    stats = json.loads(lines[-1])
     arrow_path = out_dir / "jobs.arrow"
     # Read via a plain file handle (not pa.ipc.open_file's default mmap) so
     # no memory mapping outlives this call -- on Windows a lingering mmap
@@ -187,9 +238,10 @@ def load_duckdb(table: pa.Table, db_path: Path, full: bool) -> tuple[float, int]
             f"SELECT {col_list} FROM arrow_jobs"
         )
     elapsed = time.perf_counter() - t0
-    result = con.execute("SELECT COUNT(*) FROM jobs").fetchone()
-    assert result is not None
-    total_rows = result[0]
+    # fetchone() is Optional per the DB-API; COUNT(*) always returns a row, but
+    # an `assert` here would be stripped under `python -O`.
+    row = con.execute("SELECT COUNT(*) FROM jobs").fetchone()
+    total_rows = int(row[0]) if row else 0
     con.close()
     return elapsed, total_rows
 
@@ -343,15 +395,9 @@ def main() -> None:
         flush=True,
     )
 
-    if n_rows and duckdb_time > 0 and sqlite_time > 0:
-        speedup = sqlite_time / duckdb_time
-        faster = "DuckDB" if speedup >= 1 else "SQLite"
-        factor = speedup if speedup >= 1 else 1 / speedup
-        print(
-            f"\n{faster} was {factor:.2f}x faster than "
-            f"{'SQLite' if faster == 'DuckDB' else 'DuckDB'} for the insert stage.",
-            flush=True,
-        )
+    # No SQLite-vs-DuckDB verdict is printed: the two insert stages use
+    # different strategies in different languages (see Design notes), so a
+    # head-to-head ratio would read as a benchmark result it can't support.
 
     print("\nDONE", flush=True)
 

@@ -1,9 +1,14 @@
-//! Mirror of `flatten()` in `ingest_and_benchmark.py`: one validated
-//! `JobPage` -> one flat row matching the 33-column `COLUMNS` order.
+//! One validated `JobPage` -> one flat 33-column row. Field order here is the
+//! canonical column order, mirrored by `arrow_out.rs` and `sqlite_out.rs`.
+//!
+//! `Serialize` is derived so the golden tests can snapshot a whole row; the
+//! pipeline itself never serializes `FlatRow`.
 
 use crate::schema::JobPage;
 use chrono::SecondsFormat;
+use serde::Serialize;
 
+#[derive(Serialize)]
 pub struct FlatRow {
     pub id: String,
     pub source: String,

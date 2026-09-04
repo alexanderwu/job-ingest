@@ -43,8 +43,8 @@ pub struct GeoPoint {
 pub struct JobInformation {
     pub title: String,
     pub job_title_raw: String,
-    // Excluded from the ji blob (has its own column), mirroring
-    // `model_dump(exclude={"description"})`.
+    // Excluded from the ji blob: it has its own column, and duplicating the
+    // largest field into the blob would roughly double the stored bytes.
     #[serde(skip_serializing)]
     pub description: String,
     #[serde(rename = "viewedByUsers", default, deserialize_with = "null_to_vec")]

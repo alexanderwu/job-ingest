@@ -36,6 +36,7 @@ import re
 import sys
 import time
 from html.parser import HTMLParser
+from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 
 import requests
@@ -75,40 +76,42 @@ class StaleBuildId(Exception):
 
 # ---------------------------------------------------------------- HTML -> text
 class _TextExtractor(HTMLParser):
-    BLOCK_TAGS = frozenset({
-        "p",
-        "div",
-        "br",
-        "li",
-        "ul",
-        "ol",
-        "h1",
-        "h2",
-        "h3",
-        "h4",
-        "h5",
-        "h6",
-        "tr",
-        "table",
-        "section",
-        "article",
-    })
+    BLOCK_TAGS = frozenset(
+        {
+            "p",
+            "div",
+            "br",
+            "li",
+            "ul",
+            "ol",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "tr",
+            "table",
+            "section",
+            "article",
+        }
+    )
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.parts = []
+        self.parts: list[str] = []
 
-    def handle_starttag(self, tag, attrs):
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in self.BLOCK_TAGS:
             self.parts.append("\n")
         if tag == "li":
             self.parts.append("- ")
 
-    def handle_endtag(self, tag):
+    def handle_endtag(self, tag: str) -> None:
         if tag in self.BLOCK_TAGS:
             self.parts.append("\n")
 
-    def handle_data(self, data):
+    def handle_data(self, data: str) -> None:
         self.parts.append(data)
 
 
@@ -179,14 +182,19 @@ def get_build_id(client: Client) -> str:
     return m.group(1)
 
 
-def search_page(client: Client, build_id: str, search_state: dict, page: int) -> dict:
+def search_page(
+    client: Client, build_id: str, search_state: dict[str, Any], page: int
+) -> dict[str, Any]:
     ss = quote(json.dumps(search_state, separators=(",", ":")))
     url = f"{BASE}/_next/data/{build_id}/index.json?searchState={ss}&page={page}"
     data = client.get(url).json()
-    return data.get("pageProps", {})
+    props: dict[str, Any] = data.get("pageProps", {})
+    return props
 
 
-def fetch_job_detail(client: Client, build_id: str, requisition_id: str):
+def fetch_job_detail(
+    client: Client, build_id: str, requisition_id: str
+) -> tuple[dict[str, Any] | None, str]:
     """Returns (job_dict_or_None, canonical_hiringcafe_url_or_empty)."""
     url = f"{BASE}/_next/data/{build_id}/job/x-{quote(requisition_id)}.json"
     props = client.get(url).json().get("pageProps", {})
@@ -201,13 +209,15 @@ def fetch_job_detail(client: Client, build_id: str, requisition_id: str):
 
 
 # ------------------------------------------------------------------ flattening
-def _join(val):
+def _join(val: Any) -> str:
     if isinstance(val, list):
         return "; ".join(str(v) for v in val)
-    return val if val is not None else ""
+    return "" if val is None else str(val)
 
 
-def flatten(hit: dict, detail: dict | None, canonical_url: str) -> dict:
+def flatten(
+    hit: dict[str, Any], detail: dict[str, Any] | None, canonical_url: str
+) -> dict[str, Any]:
     v5 = (
         (detail or hit).get("v5_processed_job_data")
         or hit.get("v5_processed_job_data")
@@ -240,17 +250,19 @@ def flatten(hit: dict, detail: dict | None, canonical_url: str) -> dict:
 # ------------------------------------------------------------------------ main
 def parse_search_state(
     query: str | None, url: str | None, search_state: str | None
-) -> dict:
+) -> dict[str, Any]:
     if url:
         qs = parse_qs(urlparse(url).query)
         if "searchState" in qs:
-            return json.loads(qs["searchState"][0])
+            from_url: dict[str, Any] = json.loads(qs["searchState"][0])
+            return from_url
         print(
             "WARNING: no searchState in --url; scraping default feed.", file=sys.stderr
         )
         return {}
     if search_state:
-        return json.loads(search_state)
+        from_arg: dict[str, Any] = json.loads(search_state)
+        return from_arg
     if query:
         return {"searchQuery": query}
     return {}
@@ -290,7 +302,7 @@ def main(
         "--no-descriptions",
         help="skip per-job detail fetches (much faster, no description text)",
     ),
-):
+) -> None:
     if delay < 0.5:
         print("Refusing delay < 0.5s — be polite to their servers.", file=sys.stderr)
         delay = 0.5
@@ -302,7 +314,8 @@ def main(
     build_id = get_build_id(client)
     print(f"  buildId = {build_id}")
 
-    rows, seen = [], set()
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
     raw_dump = open(jsonl, "w", encoding="utf-8") if jsonl else None
     page = 0
     try:

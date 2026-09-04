@@ -1,6 +1,7 @@
 //! Build a 33-column RecordBatch from the flattened rows and write it as an
 //! Arrow IPC (Feather v2) file, and optionally as Parquet. Field names/order
-//! must match `COLUMNS` in `ingest_and_benchmark.py`.
+//! must match the `FlatRow` field order in `flatten.rs`; the Python wrapper
+//! derives its DuckDB column list from this Arrow schema.
 
 use std::fs::File;
 use std::io::BufWriter;

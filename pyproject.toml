@@ -19,7 +19,8 @@ dependencies = [
 ]
 
 [project.scripts]
-job-ingest = "job_ingest:main"
+job-ingest = "job_ingest.ingest_and_benchmark:main"
+job-scrape = "job_ingest.scrape_hiringcafe:app"
 
 [build-system]
 requires = ["uv_build>=0.11.26,<0.12.0"]
@@ -34,3 +35,20 @@ dev = [
 
 [tool.uv.sources]
 aw = { git = "https://github.com/alexanderwu/aw.git" }
+
+[tool.mypy]
+# `just typecheck` runs bare `mypy`, so the targets have to live here.
+# Scoped to the package (not all of src/) so stray scratch files don't fail
+# the gate.
+files = ["src/job_ingest"]
+python_version = "3.13"
+strict = true
+
+[[tool.mypy.overrides]]
+# Neither ships type information.
+module = ["pyarrow.*", "duckdb.*"]
+ignore_missing_imports = true
+
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

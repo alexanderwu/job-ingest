@@ -56,9 +56,12 @@ ignored, so their rows remain until the next full rebuild.
   optional zstd-compressed Parquet output.
 - `fastingest/src/sqlite_out.rs` owns SQLite creation and incremental upserts.
 - `fastingest/src/manifest.rs` owns change detection state.
+- `fastingest/src/lib.rs` holds the pipeline itself (`run`), so the tests
+  exercise the same code path the binary does; `main.rs` is a thin clap CLI
+  over it that prints the stats line and maps fatal errors to an exit code.
 - `src/job_ingest/ingest_and_benchmark.py` builds and invokes the sidecar,
   loads its Arrow output into DuckDB, handles incremental Parquet exports, and
-  prints benchmark results.
+  prints stage timings.
 
 The sidecar exits successfully when individual files fail validation. It
 counts those failures, prints up to ten samples, skips invalid rows, and leaves
@@ -101,10 +104,32 @@ sidecar into DuckDB and is deleted after loading.
 - `uv`
 - A Rust toolchain; MSVC is required on Windows
 
-The Python dependencies are declared in `pyproject.toml` and the script's PEP
-723 metadata. `requirements.txt` contains the standalone script dependencies
-for non-uv users. If the release sidecar binary is missing or older than its
-Rust sources, the Python wrapper automatically runs `cargo build --release`.
+Python dependencies are declared in `pyproject.toml` (`just install`, or
+`uv sync`). If the release sidecar binary is missing or older than its Rust
+sources, the Python wrapper runs `cargo build --release` automatically.
+
+The wrapper finds the crate by walking up from its own location looking for
+`fastingest/Cargo.toml`. Set `FASTINGEST_DIR` to override that, or put a built
+`fastingest` on `PATH` to skip the crate lookup entirely.
+
+## Development
+
+```powershell
+just check      # format check, lint, strict mypy, pytest, cargo fmt/clippy/test
+just test       # Python + Rust tests
+just bless      # re-record the golden snapshots after a schema change
+```
+
+`fastingest/tests/golden.rs` pins the flattened output of a small fixture
+corpus (`fastingest/tests/fixtures/`, documented in its own README). `schema.rs`
+is the only description of the input format, and the JSON blob columns are
+stored as text — so reordering a struct field there silently rewrites every
+stored row with no error anywhere. The snapshots exist to catch exactly that;
+read the diff carefully whenever `just bless` changes one.
+
+`tests/test_ingest_and_benchmark.py` covers the Python side: crate discovery,
+the subprocess contract, the Arrow handoff, incremental skipping, and whether
+`DUCKDB_DDL` still matches the sidecar's Arrow schema.
 
 ## Benchmark
 
@@ -118,6 +143,13 @@ validation errors.
 | DuckDB insert             | 0.85 s             |
 | DuckDB total (parse+load) | 1.18 s             |
 | incremental, no changes   | <0.01 s            |
+
+The SQLite and DuckDB insert rows are not a like-for-like comparison and no
+winner is declared: SQLite is written row-wise by rusqlite inside the sidecar,
+while DuckDB bulk-registers an Arrow table from Python. They measure two
+different strategies in two different languages, one of them across a
+subprocess boundary. Read them as the cost of each stage in this pipeline, not
+as a benchmark of the two engines against each other.
 
 The sidecar uses serde_json's `float_roundtrip` feature so parsed IEEE-754
 values match Python float semantics. Full-run Parquet is written directly by

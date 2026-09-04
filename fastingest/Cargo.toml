@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 rayon = "1.10"
+clap = { version = "4", features = ["derive"] }
 # zlib-rs backend: pure Rust (no C toolchain needed on MSVC), noticeably
 # faster inflate than the default miniz_oxide.
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

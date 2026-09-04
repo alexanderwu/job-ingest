@@ -1,4 +1,0 @@
-# For non-uv users; the script also carries PEP 723 metadata (`uv run <script>`).
-# ingest_and_benchmark.py:
-duckdb>=1.0
-pyarrow>=17

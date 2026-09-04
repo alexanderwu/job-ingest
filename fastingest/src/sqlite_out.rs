@@ -1,8 +1,8 @@
-//! Direct SQLite output via rusqlite (bundled). Replaces the Python
-//! executemany path: rows go straight from the flattened structs into the
-//! database, no Arrow round-trip or Python tuple materialization.
+//! Direct SQLite output via rusqlite (bundled): rows go straight from the
+//! flattened structs into the database, with no Arrow round-trip.
 //!
-//! DDL and pragmas match the original `ingest_and_benchmark.py` loader.
+//! Column order in the DDL below must match the `FlatRow` field order in
+//! `flatten.rs` — the INSERT binds positionally.
 
 use std::path::Path;
 use std::time::Instant;
