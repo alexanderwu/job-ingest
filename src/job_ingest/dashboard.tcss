@@ -1,0 +1,144 @@
+/* Styles for job_ingest.dashboard.
+   CSS_PATH resolves relative to the module, and uv_build includes files
+   under the module directory, so this ships with the package. */
+
+Screen {
+    layers: base;
+}
+
+#headline {
+    padding: 1 2;
+    background: $panel;
+    color: $text;
+    height: auto;
+}
+
+#overview-scroll {
+    height: 1fr;
+    padding: 0 2;
+}
+
+#spark-title {
+    padding: 1 0 0 0;
+    color: $text-muted;
+}
+
+#spark {
+    height: 4;
+    margin-bottom: 1;
+}
+
+#panels {
+    height: auto;
+}
+
+#paths {
+    padding: 0 2;
+    background: $panel;
+    height: 3;
+}
+
+#run-panels {
+    height: auto;
+}
+
+#ingest-panel,
+#scrape-panel {
+    width: 1fr;
+    height: auto;
+    padding: 0 2;
+    border: round $primary;
+}
+
+/* One-line inputs. The Run tab carries ten controls plus a log; with the
+   default 3-row bordered Input it overflowed a 120x40 terminal and the
+   Cancel button, the log and Run scrape were simply unreachable. */
+#ingest-panel Input,
+#scrape-panel Input {
+    height: 1;
+    border: none;
+    background: $boost;
+    margin-bottom: 1;
+}
+
+#scrape-numbers {
+    height: 1;
+}
+
+#scrape-numbers Input {
+    width: 1fr;
+    margin-right: 1;
+}
+
+#preset-summary {
+    color: $text-muted;
+    height: 3;
+}
+
+#shared-filters {
+    color: $text-disabled;
+    height: 3;
+}
+
+#run-status {
+    height: 3;
+    padding: 0 2;
+}
+
+#progress {
+    width: 1fr;
+    padding: 1 0 0 0;
+}
+
+#cancel {
+    width: 18;
+}
+
+#log {
+    height: 1fr;
+    min-height: 5;
+    border: round $secondary;
+    margin: 0 2;
+}
+
+#summary {
+    padding: 0 2 1 2;
+    height: auto;
+    color: $success;
+}
+
+#browse-controls {
+    height: auto;
+    padding: 1 2 0 2;
+}
+
+#search {
+    width: 3fr;
+}
+
+#include-expired {
+    width: 1fr;
+}
+
+#results {
+    height: 1fr;
+    margin: 1 2 0 2;
+}
+
+#page-info {
+    padding: 0 2;
+    color: $text-muted;
+    height: auto;
+}
+
+#browse-nav {
+    height: auto;
+    padding: 0 2;
+}
+
+#detail {
+    height: auto;
+    max-height: 12;
+    padding: 1 2;
+    border-top: solid $secondary;
+}
