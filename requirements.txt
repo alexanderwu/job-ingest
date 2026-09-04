@@ -1,6 +1,4 @@
-# For non-uv users; both scripts also carry PEP 723 headers (`uv run <script>`).
+# For non-uv users; the script also carries PEP 723 metadata (`uv run <script>`).
 # ingest_and_benchmark.py:
 duckdb>=1.0
 pyarrow>=17
-msgspec>=0.18
-# verify_parity.py needs only msgspec + pyarrow from the above.

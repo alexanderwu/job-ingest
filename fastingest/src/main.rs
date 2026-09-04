@@ -126,7 +126,11 @@ fn main() -> ExitCode {
 
     // Incremental only works against an existing manifest AND SQLite DB;
     // otherwise fall back to a full rebuild.
-    let old_manifest = if full { None } else { manifest::load(&manifest_path) };
+    let old_manifest = if full {
+        None
+    } else {
+        manifest::load(&manifest_path)
+    };
     if !full && (old_manifest.is_none() || !sqlite_path.exists()) {
         full = true;
     }
@@ -174,10 +178,9 @@ fn main() -> ExitCode {
         let path = &files[i];
         match result {
             Ok(row) => {
-                if let (Some(name), Some((mtime_ns, size))) = (
-                    path.file_name().and_then(|n| n.to_str()),
-                    stats_by_file[i],
-                ) {
+                if let (Some(name), Some((mtime_ns, size))) =
+                    (path.file_name().and_then(|n| n.to_str()), stats_by_file[i])
+                {
                     if let Some(old) = old_manifest.get(name) {
                         if old.requisition_id != row.requisition_id {
                             stale_rids.push(old.requisition_id.clone());

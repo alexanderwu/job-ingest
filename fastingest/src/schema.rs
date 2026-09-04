@@ -1,16 +1,15 @@
-//! serde mirror of `job-ingest/job_schema.py` (Pydantic v2).
+//! Canonical serde schema for HiringCafe job-listing JSON.
 //!
-//! Invariants that keep the JSON blob columns equivalent to the Python
-//! output (`model_dump_json(by_alias=True)` / `model_dump()`):
-//! - field order in each struct matches the Pydantic class definition order;
-//! - `#[serde(rename = ...)]` reproduces Pydantic aliases in both directions;
-//! - `Option` fields serialize as `null` (never skipped), like Pydantic;
-//! - no `deny_unknown_fields` — Pydantic ignores extra keys by default.
+//! Serialization invariants for the nested JSON blob columns:
+//! - field order in each struct is stable;
+//! - `#[serde(rename = ...)]` preserves source field names;
+//! - `Option` fields serialize as `null` rather than being skipped;
+//! - unknown input fields are accepted.
 
 use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Deserializer, Serialize};
 
-/// Pydantic `NullableList`: explicit JSON `null` -> `[]`.
+/// Normalize an explicit JSON `null` to an empty list.
 /// (`#[serde(default)]` still handles the key being absent entirely.)
 fn null_to_vec<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
     Ok(Option::<Vec<String>>::deserialize(d)?.unwrap_or_default())
@@ -310,8 +309,8 @@ pub struct Job {
     pub board_token: StrOrInt,
     pub source: String,
     pub apply_url: String,
-    // Required in the Pydantic schema — kept so its absence still fails
-    // validation, even though flatten() never reads it.
+    // Required by the input contract so its absence fails validation, even
+    // though flatten() never reads it.
     #[allow(dead_code)]
     pub source_and_board_token: String,
     #[serde(default)]
