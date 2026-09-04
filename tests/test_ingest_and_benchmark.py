@@ -8,6 +8,7 @@ whether DUCKDB_DDL still agrees with the sidecar's Arrow schema.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -16,10 +17,13 @@ from pathlib import Path
 import pytest
 
 from job_ingest.ingest_and_benchmark import (
-    DUCKDB_DDL,
+    INCOMPLETE_MARKER,
+    IngestError,
+    ddl_columns,
     find_crate_dir,
     load_duckdb,
     run_fastingest,
+    run_ingest,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -83,12 +87,7 @@ class TestEndToEnd:
 
         assert total_rows == VALID_FIXTURES
         assert insert_sec >= 0
-        ddl_columns = [
-            line.strip().split()[0]
-            for line in DUCKDB_DDL.splitlines()
-            if line.startswith("    ")
-        ]
-        assert ddl_columns == list(table.column_names)
+        assert list(ddl_columns()) == list(table.column_names)
 
     def test_second_run_skips_unchanged_files(self, tmp_path: Path) -> None:
         run_fastingest(FIXTURES, tmp_path, limit=None, full=True, parquet=False)
@@ -106,7 +105,7 @@ class TestEndToEnd:
     def test_sidecar_failure_reports_stderr(self, tmp_path: Path) -> None:
         """A fatal sidecar error must surface its message, not a bare
         CalledProcessError with stderr swallowed by capture_output."""
-        with pytest.raises(SystemExit) as excinfo:
+        with pytest.raises(IngestError) as excinfo:
             run_fastingest(
                 tmp_path / "does-not-exist",
                 tmp_path,
@@ -130,3 +129,155 @@ def test_cli_rejects_unknown_flags() -> None:
     )
     assert proc.returncode != 0
     assert "--bogus" in proc.stderr
+
+
+@needs_sidecar
+class TestRunIngest:
+    """The library core: typed results and streamed progress, no stdout."""
+
+    def test_returns_a_populated_result_and_streams_progress(
+        self, tmp_path: Path
+    ) -> None:
+        events: list[str] = []
+        result = run_ingest(FIXTURES, tmp_path, full=True, on_event=events.append)
+
+        assert result.full is True
+        assert result.ok == VALID_FIXTURES
+        assert result.errors == 2
+        assert result.duckdb_total_rows == VALID_FIXTURES
+        assert result.sqlite_total_rows == VALID_FIXTURES
+        assert result.files == VALID_FIXTURES + 2
+        assert len(result.error_samples) == 2
+        assert result.parquet_sec is None
+        assert result.parquet_bytes is None
+        assert result.sqlite_bytes > 0
+        assert result.duckdb_bytes > 0
+        # The lines that only make sense mid-run go out through on_event; the
+        # summary block is derived from the result afterwards.
+        assert any("Loading into DuckDB" in line for line in events)
+        assert any("full rebuild" in line for line in events)
+        assert not any("BENCHMARK SUMMARY" in line for line in events)
+
+    def test_a_successful_run_leaves_no_recovery_marker(self, tmp_path: Path) -> None:
+        run_ingest(FIXTURES, tmp_path, full=True)
+        assert not (tmp_path / INCOMPLETE_MARKER).exists()
+
+
+class TestSidecarFailuresAreIngestErrors:
+    """No Rust toolchain: the sidecar call is stubbed at subprocess level."""
+
+    @staticmethod
+    def _fake_proc(stdout: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=stdout, stderr=""
+        )
+
+    def _stub_binary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            "job_ingest.ingest_and_benchmark.ensure_rust_binary",
+            lambda *_a, **_k: Path("fastingest"),
+        )
+
+    def test_a_malformed_stats_line_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._stub_binary(monkeypatch)
+        monkeypatch.setattr(
+            "job_ingest.ingest_and_benchmark.subprocess.run",
+            lambda *_a, **_k: self._fake_proc("not json at all"),
+        )
+        with pytest.raises(IngestError, match="not valid JSON"):
+            run_fastingest(tmp_path, tmp_path, limit=None, full=True, parquet=False)
+
+    def test_an_empty_stdout_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._stub_binary(monkeypatch)
+        monkeypatch.setattr(
+            "job_ingest.ingest_and_benchmark.subprocess.run",
+            lambda *_a, **_k: self._fake_proc(""),
+        )
+        with pytest.raises(IngestError, match="no stats line"):
+            run_fastingest(tmp_path, tmp_path, limit=None, full=True, parquet=False)
+
+    def test_a_missing_arrow_handoff_is_reported(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        self._stub_binary(monkeypatch)
+        monkeypatch.setattr(
+            "job_ingest.ingest_and_benchmark.subprocess.run",
+            lambda *_a, **_k: self._fake_proc(json.dumps({"ok": 0})),
+        )
+        with pytest.raises(IngestError, match="Arrow handoff"):
+            run_fastingest(tmp_path, tmp_path, limit=None, full=True, parquet=False)
+
+
+class TestIncompleteMarker:
+    """Crash consistency across the sidecar/DuckDB commit boundary.
+
+    The sidecar commits SQLite and ingest_manifest.json before Python commits
+    DuckDB. Without the marker, a failure in between leaves a manifest that
+    tells the next incremental run to skip a delta DuckDB never received.
+    """
+
+    STATS = {
+        "ok": 0,
+        "files": 0,
+        "skipped": 0,
+        "parsed": 0,
+        "errors": 0,
+        "sqlite_insert_sec": 0.0,
+        "sqlite_total_rows": 0,
+        "error_samples": [],
+    }
+
+    def _seed_a_complete_previous_run(self, out_dir: Path) -> None:
+        """Everything present, so `full` is False unless something forces it."""
+        (out_dir / "jobs.sqlite").write_text("")
+        (out_dir / "jobs.duckdb").write_text("")
+        (out_dir / "ingest_manifest.json").write_text("{}")
+
+    def test_a_duckdb_failure_forces_the_next_run_full(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        import pyarrow as pa
+
+        self._seed_a_complete_previous_run(tmp_path)
+        full_flags: list[bool] = []
+
+        def fake_run_fastingest(
+            _json_dir: Path,
+            _out_dir: Path,
+            _limit: int | None,
+            full: bool,
+            parquet: bool = False,
+            on_event: object = None,
+        ) -> tuple[pa.Table, dict[str, object]]:
+            full_flags.append(full)
+            return pa.table({"requisition_id": []}), dict(self.STATS)
+
+        monkeypatch.setattr(
+            "job_ingest.ingest_and_benchmark.run_fastingest", fake_run_fastingest
+        )
+        monkeypatch.setattr(
+            "job_ingest.ingest_and_benchmark.load_duckdb",
+            lambda *_a, **_k: (_ for _ in ()).throw(IngestError("duckdb is locked")),
+        )
+
+        with pytest.raises(IngestError, match="locked"):
+            run_ingest(tmp_path, tmp_path)
+
+        assert full_flags == [False]
+        assert (tmp_path / INCOMPLETE_MARKER).exists(), (
+            "the marker must survive the failure, or the next incremental run "
+            "silently skips the delta DuckDB never saw"
+        )
+
+        monkeypatch.setattr(
+            "job_ingest.ingest_and_benchmark.load_duckdb", lambda *_a, **_k: (0.0, 0)
+        )
+        result = run_ingest(tmp_path, tmp_path)
+
+        assert full_flags == [False, True]
+        assert result.full is True
+        assert not (tmp_path / INCOMPLETE_MARKER).exists()
