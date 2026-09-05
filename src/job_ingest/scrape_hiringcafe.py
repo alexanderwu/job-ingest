@@ -92,6 +92,14 @@ USER_AGENT = (
 DEFAULT_RAW_DIR = Path("data/raw/_json")
 DEFAULT_INTERIM_DIR = Path("data/interim")
 
+#: A page/build-id fetch failing after 3 tries aborts the whole run and is
+#: loud about it; a job-detail fetch failing only loses that one job's
+#: description (`fetch_job_detail` -> None), silently, mid-run. A live run
+#: (2026-09-04) hit sustained 429s that exhausted the default 3 tries on 7 of
+#: ~130 jobs. Give detail fetches more headroom than the default, on top of
+#: `Client`'s adaptive pacing, before conceding one.
+DETAIL_FETCH_RETRIES = 6
+
 
 class ScrapeError(RuntimeError):
     """A scrape could not be completed.
@@ -193,7 +201,24 @@ class Client:
     checked before each attempt, so the worst case is one in-flight request
     running to its 30s timeout -- describe it as "after the current
     request", never as an instant stop.
+
+    `delay` is a floor, not the actual steady-state pace: a live run against
+    hiringcafe.com (2026-09-04, ~150 job-detail fetches) showed a hard
+    request-volume limiter that starts 429ing every request after ~28
+    requests at a 1.0s pace and does not fully clear even after many slower,
+    backed-off retries. Per-request backoff alone can't fix that -- it reacts
+    to one failing call and then resumes the same pace -- so `_delay_multiplier`
+    widens the pacing delay itself on 429/5xx and decays it back down on
+    sustained clean successes.
     """
+
+    #: How fast the pacing delay widens on 429/5xx and decays back on success,
+    #: and the ceiling on how far it can widen. Doubling/0.8x and a 10x cap
+    #: were picked to react within a couple of failures and recover within a
+    #: few dozen clean requests, not tuned against a formal target rate.
+    _ADAPTIVE_DELAY_GROWTH = 2.0
+    _ADAPTIVE_DELAY_DECAY = 0.8
+    _ADAPTIVE_DELAY_CAP = 10.0
 
     def __init__(
         self,
@@ -218,6 +243,7 @@ class Client:
         self._last_request = 0.0
         self._cancel = cancel
         self._on_warning = on_warning
+        self._delay_multiplier = 1.0
 
     @property
     def cancelled(self) -> bool:
@@ -244,7 +270,9 @@ class Client:
         for attempt in range(retries):
             if self.cancelled:
                 raise ScrapeCancelled("cancelled before requesting " + url)
-            wait = self.delay - (time.time() - self._last_request)
+            wait = self.delay * self._delay_multiplier - (
+                time.time() - self._last_request
+            )
             if wait > 0:
                 self._sleep(wait)
             self._last_request = time.time()
@@ -271,6 +299,15 @@ class Client:
             if resp.status_code == 503 and resp.headers.get("cf-mitigated"):
                 self._on_warning("  ! HTTP 503: Cloudflare mitigation (cf-mitigated)")
             if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                if self._delay_multiplier < self._ADAPTIVE_DELAY_CAP:
+                    self._delay_multiplier = min(
+                        self._ADAPTIVE_DELAY_CAP,
+                        self._delay_multiplier * self._ADAPTIVE_DELAY_GROWTH,
+                    )
+                    self._on_warning(
+                        "  ! sustained rate limiting -- slowing to "
+                        f"{self.delay * self._delay_multiplier:.1f}s between requests"
+                    )
                 if attempt == retries - 1:
                     raise ScrapeError(
                         f"GET {url} gave HTTP {resp.status_code} after {retries} tries"
@@ -281,6 +318,12 @@ class Client:
                 )
                 self._sleep(backoff)
                 continue
+            if self._delay_multiplier > 1.0:
+                self._delay_multiplier = max(
+                    1.0, self._delay_multiplier * self._ADAPTIVE_DELAY_DECAY
+                )
+                if self._delay_multiplier == 1.0:
+                    self._on_warning("  ! back to normal pace")
             try:
                 cast(HttpResponse, resp).raise_for_status()
             except HTTPError as e:
@@ -402,14 +445,18 @@ def fetch_job_detail(
 ) -> tuple[dict[str, Any] | None, str]:
     """Returns (job_dict_or_None, canonical_hiringcafe_url_or_empty)."""
     url = f"{BASE}/_next/data/{build_id}/job/x-{quote(requisition_id)}.json"
-    props = _json_body(client.get(url)).get("pageProps", {})
+    props = _json_body(client.get(url, retries=DETAIL_FETCH_RETRIES)).get(
+        "pageProps", {}
+    )
     canonical_url = ""
     if isinstance(props, dict) and "__N_REDIRECT" in props:  # canonical slug redirect
         path = props["__N_REDIRECT"]  # e.g. /job/title-company-city-<id>
         canonical_url = BASE + str(path)
         slug = str(path).split("/job/", 1)[-1]
         url = f"{BASE}/_next/data/{build_id}/job/{quote(slug)}.json"
-        props = _json_body(client.get(url)).get("pageProps", {})
+        props = _json_body(client.get(url, retries=DETAIL_FETCH_RETRIES)).get(
+            "pageProps", {}
+        )
     if not isinstance(props, dict):
         return None, canonical_url
     job = props.get("job")
