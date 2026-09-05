@@ -36,7 +36,9 @@ Library API:
   never prints. main() is the only place that maps the domain exception to
   CLI stderr and an exit code.
 
-Requires: pip install requests typer
+Requires: pip install curl_cffi typer
+The default is a Chrome TLS handshake with an honest JobScout User-Agent.
+Use --user-agent "" for the profile's browser UA, or --impersonate none to disable.
 Be polite: keep --delay >= 0.5s. Unofficial API; their robots.txt discourages
 bulk crawling, so scrape only what you need.
 """
@@ -59,10 +61,11 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, cast
 from urllib.parse import parse_qs, quote, urlparse
 
-import requests
+from curl_cffi import requests as curl_requests
+from curl_cffi.requests.exceptions import HTTPError, RequestException
 import typer
 
 BASE = "https://hiringcafe.com"
@@ -93,7 +96,7 @@ class ScrapeError(RuntimeError):
 class ScrapeCancelled(ScrapeError):
     """Cancellation was requested and observed at a checkpoint.
 
-    Cooperative, not immediate: a request already inside `requests` runs to
+    Cooperative, not immediate: a request already inside `curl_cffi` runs to
     its timeout. See ScrapeConfig for what a caller can promise a user.
     """
 
@@ -159,6 +162,18 @@ def html_to_text(html: str) -> str:
 
 
 # ------------------------------------------------------------------- HTTP layer
+class HttpResponse(Protocol):
+    status_code: int
+
+    @property
+    def text(self) -> str: ...
+
+    url: str
+
+    def json(self) -> Any: ...
+    def raise_for_status(self) -> None: ...
+
+
 class Client:
     """Rate-limited HTTP with retries.
 
@@ -175,12 +190,17 @@ class Client:
         *,
         cancel: threading.Event | None = None,
         on_warning: Callable[[str], None] = _noop,
+        impersonate: str = "chrome",
+        user_agent: str = USER_AGENT,
     ) -> None:
         self.delay = delay
-        self.session = requests.Session()
+        self.impersonate = impersonate
+        self.session = curl_requests.Session(
+            impersonate=None if impersonate == "none" else impersonate
+        )
         self.session.headers.update(
             {
-                "User-Agent": USER_AGENT,
+                **({"User-Agent": user_agent} if user_agent else {}),
                 "Accept": "application/json, text/html;q=0.9",
             }
         )
@@ -209,7 +229,7 @@ class Client:
         else:
             time.sleep(seconds)
 
-    def get(self, url: str, retries: int = 3) -> requests.Response:
+    def get(self, url: str, retries: int = 3) -> HttpResponse:
         for attempt in range(retries):
             if self.cancelled:
                 raise ScrapeCancelled("cancelled before requesting " + url)
@@ -218,8 +238,13 @@ class Client:
                 self._sleep(wait)
             self._last_request = time.time()
             try:
-                resp = self.session.get(url, timeout=30)
-            except requests.RequestException as e:
+                headers = (
+                    {"Accept": "*/*", "x-nextjs-data": "1", "Referer": BASE + "/"}
+                    if urlparse(url).path.startswith("/_next/data/")
+                    else {}
+                )
+                resp = self.session.get(url, timeout=30, headers=headers)
+            except RequestException as e:
                 if attempt == retries - 1:
                     raise ScrapeError(f"GET {url} failed: {e}") from e
                 self._on_warning(f"  ! {type(e).__name__}, retrying...")
@@ -227,7 +252,14 @@ class Client:
                 continue
             if resp.status_code == 404:
                 raise StaleBuildId(url)
-            if resp.status_code in (429, 403, 500, 502, 503):
+            if resp.status_code == 403:
+                raise ScrapeError(
+                    f"HTTP 403 with impersonation profile {self.impersonate!r}; "
+                    "try --impersonate or --user-agent (empty for the browser UA)"
+                )
+            if resp.status_code == 503 and resp.headers.get("cf-mitigated"):
+                self._on_warning("  ! HTTP 503: Cloudflare mitigation (cf-mitigated)")
+            if resp.status_code == 429 or 500 <= resp.status_code < 600:
                 if attempt == retries - 1:
                     raise ScrapeError(
                         f"GET {url} gave HTTP {resp.status_code} after {retries} tries"
@@ -239,14 +271,14 @@ class Client:
                 self._sleep(backoff)
                 continue
             try:
-                resp.raise_for_status()
-            except requests.HTTPError as e:
+                cast(HttpResponse, resp).raise_for_status()
+            except HTTPError as e:
                 raise ScrapeError(f"GET {url} failed: {e}") from e
             return resp
         raise ScrapeError(f"GET {url}: retries exhausted")
 
 
-def _json_body(resp: requests.Response) -> dict[str, Any]:
+def _json_body(resp: HttpResponse) -> dict[str, Any]:
     try:
         data = resp.json()
     except ValueError as e:
@@ -603,6 +635,8 @@ class ScrapeConfig:
     #: When set, each job is also written as an ingest-compatible page.
     #: Requires descriptions=True.
     raw_dir: Path | None = None
+    impersonate: str = "chrome"
+    user_agent: str = USER_AGENT
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,7 +679,7 @@ def scrape(
     the verbatim job objects.
 
     Pass a Client built with a cancellation Event to make a run stoppable.
-    Cancellation is cooperative: a request already inside `requests` runs to
+    Cancellation is cooperative: a request already inside `curl_cffi` runs to
     its timeout, so promise users "after the current request", not a second.
 
     Raises ScrapeError for configuration and protocol failures. Validation
@@ -664,7 +698,9 @@ def scrape(
         )
     warnings: deque[str] = deque()
     if client is None:
-        client = Client(config.delay)
+        client = Client(
+            config.delay, impersonate=config.impersonate, user_agent=config.user_agent
+        )
     # scrape() owns warning routing for the duration of the run: retry and
     # backoff diagnostics are events, not stderr, whoever built the Client.
     client.route_warnings(warnings.append)
@@ -884,6 +920,13 @@ def main(
         ),
     ),
     max_jobs: int = typer.Option(40, "--max-jobs"),
+    impersonate: str = typer.Option(
+        "chrome", help="TLS browser profile; none disables impersonation"
+    ),
+    user_agent: str = typer.Option(
+        USER_AGENT,
+        help="Honest JobScout UA by default; empty uses the browser profile UA",
+    ),
     max_pages: int = typer.Option(25, "--max-pages"),
     delay: float = typer.Option(
         1.0, "--delay", help="seconds between requests (default 1.0)"
@@ -923,6 +966,8 @@ def main(
             delay=delay,
             descriptions=not no_descriptions,
             raw_dir=raw_dir,
+            impersonate=impersonate,
+            user_agent=user_agent,
         )
         if preset:
             chosen = saved_search(preset)
