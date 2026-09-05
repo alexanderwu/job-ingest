@@ -46,8 +46,31 @@ and `job-search/job_search/scrape.py`.
   search-only concept rather than described as "carried over".
 - Board hits do carry `id` and `requisition_id`, plus the same
   `job_information` / `v5_processed_job_data` blocks a search hit has, so
-  dedup, `job_summary`, `_merge_identity`, and the detail-fetch path all work
+  `job_summary`, `_merge_identity`, and the detail-fetch path all work
   unchanged.
+- Identity fields, measured over the 34 numbered pages of one sampled Board
+  (2,420 hits): `id` and `requisition_id` are **1:1** — 2,418 unique values
+  each, and no `requisition_id` maps to more than one `id`, across 56 distinct
+  `source` values. `requisition_id` is HiringCafe-minted (`e0dv0w8wz8lqkut3`),
+  not an employer's ATS requisition number, so it is safe to use bare — which
+  is also what `raw_filename` has been assuming as the corpus key.
+- 4 hits of 2,527 carry **no `requisition_id`**. They are already dropped by the
+  existing truthiness filter, and could never be staged anyway
+  (`requisition_id` is in `REQUIRED_JOB_KEYS`).
+- `collapse_key` is a much coarser grouping: 1,325 groups over 2,418 unique
+  jobs, groups of up to 8, spanning more than one `board_token` only 4 times.
+  It groups one role posted across locations/levels at one company. It is not
+  an identity key and must not be used as one.
+- **A Board page is not stable within a day.** The sampled directory contains a
+  stray `page.json.gz` alongside `page0.json.gz`; both report
+  `pageProps.page == 0` and the same day, but hold 103 and 106 hits. Pages also
+  shift under paging: the only two cross-page duplicates in the whole sample sat
+  at the page 0/1 boundary, the signature of a window sliding between requests.
+  This is the real argument for dedup, and a second argument for the cache — a
+  cached page cannot shift under a resumed run.
+- That stray file is also a warning about the archive directory: it holds files
+  that are not `page{N}.json.gz`. The cache must address pages by exact
+  computed filename and never glob the directory.
 - `pageProps.board` also carries `name`, `tagline`, the Board's own
   `search_state` (as a JSON string), `owner_uid`, `owner_display_name`, and
   view/subscriber counts. Two consequences: a Board's real filters are
@@ -102,6 +125,48 @@ job-scrape --url https://hiringcafe.com/b/healthcare-9ierbt6f
 job-scrape --preset DS_SF_Remote --raw-dir data/raw/_json --skip-existing-raw
 ```
 
+### Job identity and dedup
+
+- **Dedup by `requisition_id`, not `id`.** Change the `seen` set's key in the
+  shared job loop, for both Board and search sources — one identity notion for
+  the whole module.
+- This is behaviour-neutral on the sampled data (`id` and `requisition_id` are
+  1:1) and is a consistency and safety change rather than a bug fix:
+  - It makes the run's dedup key, `raw_filename`'s corpus filename, and
+    `--skip-existing-raw`'s existence check all mean the same thing by "the
+    same job". Today they disagree, which is only invisible because the two
+    fields happen to correspond.
+  - `requisition_id` is already truthiness-checked before a hit is accepted, so
+    the key can never be `None`. The current `seen.add(hit.get("id"))` has no
+    such guard: were `id` ever absent, `None` would enter the set and every
+    later id-less hit would be silently dropped.
+- Key on `str(hit["requisition_id"])`, to match `raw_filename`'s own
+  `str(... or "")` — an int `123` and a string `"123"` are one corpus file and
+  must be one job.
+- Do **not** normalize case or whitespace. `raw_filename` deliberately keeps
+  case-only variants on separate files (blake2b over the original bytes);
+  dedup must agree with it rather than collapse what the corpus splits.
+- Hits with no `requisition_id` are still dropped, but report them as a
+  per-page count (`  2 hits without a requisition_id, skipped`) instead of
+  discarding them silently. It is 0.2% today; a silent counter is how you would
+  fail to notice that becoming 20%.
+- `collapse_key` is **not** used. See "Deliberately out of scope".
+
+### Page and job limits
+
+- Raise the shared `--max-pages` default from 25 to 50. A sampled Board has
+  `totalCount` 3493 at ~100 hits per page — 34 pages — so 25 truncates a full
+  Board pull mid-way, for no reason a user would predict. Both sources stop
+  naturally on the endpoint's last-page flag, so `max_pages` is a runaway guard,
+  not a budget.
+- Leave `--max-jobs` at 40 for both sources. It is the brake on *detail*
+  requests, which are the expensive part, and it should stay small enough that a
+  bare `job-scrape --preset Board_Healthcare` is a cheap thing to type. Raising
+  it is the explicit act of asking for a big pull.
+- Consequence to document in the README: with the defaults, a Board run reads
+  page 0 and stops at 40 jobs. That is intended; `--max-jobs` is how you go
+  deeper, and the page cache makes going deeper later cheap.
+
 ### Board page archives, as a cache
 
 - Add a Board archive root setting, defaulting to `data/interim`, exposed as
@@ -136,9 +201,11 @@ job-scrape --preset DS_SF_Remote --raw-dir data/raw/_json --skip-existing-raw
 - The date directory *is* the TTL. There is no cross-day lookback: yesterday's
   Board is a different snapshot, not a cache hit.
 - Accepted consequence: one day's directory can mix a cached page 0 with pages
-  fetched hours later. Dedup is by job `id` within a run, so this is safe; it
-  only means page 0's `totalCount` may disagree with later pages. Use
-  `--refresh` when a single coherent snapshot matters.
+  fetched hours later, and two captures of one page index on one day genuinely
+  differ (103 vs 106 hits in the sample). Dedup by `requisition_id` within a run
+  makes this safe; it only means page 0's `totalCount` may disagree with later
+  pages, and that a job near a page boundary can be missed. Use `--refresh` when
+  a single coherent snapshot matters.
 - Archive the fetched page before iterating its hits, so an interrupt during
   detail fetching still leaves the Board page that was already received — and
   makes the resumed run a cache hit.
@@ -264,7 +331,11 @@ produce a warning, not an error — an archived Board can still return hits.
 
 Add two helpers with a single shared notion of the page path:
 
-- `board_page_path(interim_dir, run_date, slug, page) -> Path`.
+- `board_page_path(interim_dir, run_date, slug, page) -> Path`. Address pages by
+  this exact computed name only; never glob the directory. Real interim
+  directories contain neighbours that are not `page{N}.json.gz` — the sampled
+  one holds a stray `page.json.gz` that is a second, differently sized capture
+  of page 0.
 - `read_board_page(path) -> dict | None` — gzip+JSON read, tolerant of the
   `{"props": {...}}` wrapper, returning `None` (never raising) on any
   unreadable or unrecognisable content so the caller can treat it as a miss.
@@ -286,12 +357,14 @@ needed by the common job loop:
 | Hits | `ssrHits` | `hits` |
 | Total | `ssrTotalCount` | `totalCount` |
 | Last page | `ssrIsLastPage` | `isLastPage` |
+| Dedup key | `str(requisition_id)` | `str(requisition_id)` |
 | Pinned | `hit.is_hc_pinned`, filtered out | absent; `board.pinned_job_ids`, kept |
 | Cache | none | read `pageN.json.gz` before requesting |
 | Archive | none | full response to `pageN.json.gz` |
 
-Keep the current duplicate filtering, `max_jobs`, `max_pages`, detail requests,
-raw per-job writes, warning events, and done event semantics. Retry the same
+Keep `max_jobs`, `max_pages`, detail requests, raw per-job writes, warning
+events, and done event semantics. Duplicate filtering keeps its position in the
+loop and changes only its key, per "Job identity and dedup". Retry the same
 Board page after refreshing a stale build ID, just as search pages do. Stop on
 the endpoint's last-page flag; retain the defensive empty-new-hits stop so a
 changed or repeating endpoint cannot loop — subject to the raw-skip caveat in
@@ -318,6 +391,7 @@ Board preset keys, and the cache. Add:
 - `--refresh` (ignore today's cached Board pages and refetch).
 - `--skip-existing-raw` (requires `--raw-dir`).
 - `--impersonate PROFILE` and `--user-agent TEXT` from step 0.
+- A changed `--max-pages` default of 50, per "Page and job limits".
 
 Resolve the source once, log only the stable preset key/summary rather than the
 raw saved URL, and print the resolved Board archive directory before network
@@ -373,6 +447,19 @@ Extend `tests/test_scrape_hiringcafe.py` with network-free coverage for:
   stale-build retry, and termination.
 - Protocol drift: truthy `ssrError`, a `page` that does not echo the request,
   non-list `hits`, and missing `pageProps` each raise `ScrapeError`.
+- Dedup, as its own focused set of cases, covering both sources:
+  - Two hits sharing a `requisition_id` but differing in `id` yield one job;
+    two hits sharing an `id` but differing in `requisition_id` yield two. This
+    is the assertion that actually pins the key down — a stub whose two fields
+    agree would pass either way.
+  - An int `123` and a string `"123"` are one job.
+  - Requisition ids differing only in case are two jobs, and produce two
+    distinct `raw_filename` results. Dedup and the corpus must not disagree.
+  - A hit with no `requisition_id` is skipped, does not consume `max_jobs`,
+    does not poison the `seen` set for later id-less hits, and is reported in
+    the page's skipped count.
+  - The same job appearing on two consecutive pages is fetched once — the
+    observed cross-page duplicate pattern.
 - Atomic gzip round-trip of the complete Board response; deterministic content,
   page numbering, dated path construction, same-page replacement, cleanup on
   failure, and no page deletion on a bounded/cancelled rerun.
@@ -423,8 +510,13 @@ Job detail     -> --raw-dir/<requisition_id>.json.gz -> fastingest
 Document Board URL examples, all preset keys, `--interim-dir`, `--refresh`,
 `--skip-existing-raw`, the same-day cache semantics and their staleness
 tradeoffs, the new `--impersonate`/`--user-agent` flags and what the default
-combination is, and the fact that Board page archives are not direct input to
-the current ingest sidecar.
+combination is, the raised `--max-pages` default and why a default Board run
+still stops at 40 jobs, and the fact that Board page archives are not direct
+input to the current ingest sidecar.
+
+State once, where the corpus is described, that `requisition_id` is the single
+notion of job identity: the dedup key within a run, the `--raw-dir` filename,
+and what `--skip-existing-raw` checks for.
 
 ## Implementation order
 
@@ -435,8 +527,11 @@ the current ingest sidecar.
    unit tests.
 3. Add the Board transport, dated path builder, cache reader, atomic page
    writer, and tests.
-4. Refactor the generator onto the source abstraction, make the build-id
-   bootstrap lazy, and test both routes.
+4. Refactor the generator onto the source abstraction, switch the dedup key to
+   `requisition_id`, raise the `--max-pages` default, make the build-id
+   bootstrap lazy, and test both routes. The dedup change is small enough to
+   ride along here and wants the same tests, but it touches the search path too
+   — land it with the search-route regression tests green before moving on.
 5. Add `--skip-existing-raw` and its tests.
 6. Update CLI options/help and add CLI-level resolution tests.
 7. Update the Textual selector, summaries, checkboxes, paths, config wiring, and
@@ -478,6 +573,15 @@ land before the generator starts using it.
   `--skip-existing-raw` covers the re-run cost at a fraction of the complexity;
   revisit if descriptions need to be re-read offline.
 - Cross-day cache lookback or any TTL other than the date directory itself.
+- Collapsing on `collapse_key`. It groups one role posted across locations and
+  levels at one company: 1,325 groups over 2,418 unique jobs in the sample, so
+  an opt-in `--collapse` would roughly halve the detail fetches and the reading
+  load of a large Board pull. It is deliberately not built here, because it
+  would introduce a second, coarser notion of "same job" alongside the one
+  `requisition_id` gives the run, the corpus filename, and
+  `--skip-existing-raw`, and because which member of a group survives would be
+  arbitrary (first seen). Revisit as an explicit flag if a full-Board pull turns
+  out to be dominated by redundant postings.
 - Archiving ordinary search result pages.
 - Running all presets as a batch or deduplicating across separate preset runs.
 - Historical timestamped subdirectories within a date. The proposed layout

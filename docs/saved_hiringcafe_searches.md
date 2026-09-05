@@ -1,3 +1,23 @@
+# Boards
+
+## DA_SF_Remote
+
+https://hiringcafe.com/b/da-sf-remote-tgl2fcys
+
+## DS_SF_Remote
+
+https://hiringcafe.com/b/ds-sf-remote-77r5vzr1
+
+## DA_Healthcare
+
+https://hiringcafe.com/b/da-healthcare-awiifu1z
+
+## Healthcare
+
+https://hiringcafe.com/b/healthcare-9ierbt6f
+
+# Searches
+
 ## DS_SF_Remote
 
 https://hiringcafe.com/?searchState=%7B%22locations%22%3A%5B%7B%22id%22%3A%226xk1yZQBoEtHp_8Uv-2X%22%2C%22types%22%3A%5B%22locality%22%5D%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22San+Francisco%22%2C%22short_name%22%3A%22San+Francisco%22%2C%22types%22%3A%5B%22locality%22%5D%7D%2C%7B%22long_name%22%3A%22California%22%2C%22short_name%22%3A%22CA%22%2C%22types%22%3A%5B%22administrative_area_level_1%22%5D%7D%2C%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22geometry%22%3A%7B%22location%22%3A%7B%22lat%22%3A37.77493%2C%22lon%22%3A-122.41942%7D%7D%2C%22formatted_address%22%3A%22San+Francisco%2C+CA%2C+US%22%2C%22population%22%3A864816%2C%22workplace_types%22%3A%5B%5D%2C%22options%22%3A%7B%22radius%22%3A100%2C%22radius_unit%22%3A%22miles%22%2C%22ignore_radius%22%3Afalse%7D%7D%2C%7B%22types%22%3A%5B%22country%22%5D%2C%22formatted_address%22%3A%22United+States%22%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22workplace_types%22%3A%5B%22Remote%22%5D%2C%22options%22%3A%7B%7D%2C%22id%22%3A%22United+Statescountry%22%7D%5D%2C%22commitmentTypes%22%3A%5B%22Full+Time%22%2C%22Contract%22%5D%2C%22dateFetchedPastNDays%22%3A1440%2C%22restrictJobsToTransparentSalaries%22%3Atrue%2C%22roleYoeRange%22%3A%5B0%2C6%5D%2C%22roleTypes%22%3A%5B%22Individual+Contributor%22%5D%2C%22doctorateDegreeRequirements%22%3A%5B%22Preferred%22%2C%22Not+Mentioned%22%5D%2C%22jobTitleQuery%22%3A%22%28%28data+OR+ml+OR+%5C%22machine+learning%5C%22+OR+%5C%22ai%5C%22+OR+%5C%22artificial+intelligence%5C%22+OR+nlp+OR+statistical+OR+bi+OR+%5C%22business+intelligence%5C%22+OR+devops+OR+mlops%29+AND+%28engineer+OR+scientist+OR+science+OR+programmer%29%29+AND+NOT+%5C%22software+engineer%5C%22+AND+NOT+%5C%22electrical+engineer%5C%22%5Cn%22%7D
