@@ -31,7 +31,7 @@ from textual.widgets import TabbedContent
 
 from job_ingest.dashboard import CUSTOM, PAGE_SIZE, Dashboard, bar
 from job_ingest.ingest_and_benchmark import DUCKDB_DDL, IngestError, IngestResult
-from job_ingest.scrape_hiringcafe import SAVED_SEARCHES, ScrapeConfig
+from job_ingest.scrape_hiringcafe import SAVED_PRESETS, ScrapeConfig
 from job_ingest.stats import JOB_ROW_COLUMNS
 
 CANNED = IngestResult(
@@ -347,9 +347,9 @@ async def _drive_presets(tmp_path: Path) -> None:
         select = app.query_one("#preset")
 
         values = [value for _label, value in select._options]
-        assert values == [s.key for s in SAVED_SEARCHES] + [CUSTOM]
-        assert select.value == SAVED_SEARCHES[0].key
-        assert SAVED_SEARCHES[0].summary in str(
+        assert values == [s.key for s in SAVED_PRESETS] + [CUSTOM]
+        assert select.value == SAVED_PRESETS[0].key
+        assert SAVED_PRESETS[0].summary in str(
             app.query_one("#preset-summary").render()
         )
         # A preset owns the search, so the custom inputs are inert.
@@ -386,7 +386,7 @@ async def _drive_preset_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         await pilot.pause()
 
         assert len(seen) == 1
-        state = seen[0].search_state
+        state = seen[0].source.search_state
         assert state["departments"] == ["Data and Analytics"]
         assert state["industries"] == ["biotechnology", "healthcare"]
         assert state["dateFetchedPastNDays"] == 1440
@@ -423,3 +423,61 @@ async def _drive_custom_conflict(
 
         assert started == [], "the same precedence rules as the CLI apply"
         assert app.busy is False
+
+
+def test_board_controls_reach_worker(tmp_path, monkeypatch):
+    drive(lambda: _drive_board_controls(tmp_path, monkeypatch))
+
+
+async def _drive_board_controls(tmp_path, monkeypatch):
+    from job_ingest.scrape_hiringcafe import BoardSource
+    from textual.widgets import Checkbox
+
+    seen = []
+    monkeypatch.setattr(
+        Dashboard, "_scrape_worker", lambda self, config: seen.append(config)
+    )
+    app = Dashboard(
+        db_path=a_corpus(tmp_path),
+        out_dir=tmp_path,
+        interim_dir=tmp_path / "interim",
+        raw_dir=tmp_path / "raw",
+    )
+    async with app.run_test(size=(120, 40)) as pilot:
+        await app.workers.wait_for_complete()
+        await show(app, pilot, "tab-run")
+        assert app.query_one("#shared-filters").display
+        assert app.query_one("#skip-existing-raw").disabled
+        assert str((tmp_path / "interim").resolve()) in app._paths_note()
+        app.query_one("#preset").value = "Board_Healthcare"
+        await pilot.pause()
+        assert not app.query_one("#shared-filters").display
+        assert "filters owned" in str(app.query_one("#preset-summary").render())
+        app.query_one("#refresh", Checkbox).value = True
+        app.query_one("#write-raw", Checkbox).value = True
+        await pilot.pause()
+        assert not app.query_one("#skip-existing-raw").disabled
+        app.query_one("#skip-existing-raw", Checkbox).value = True
+        await pilot.click("#run-scrape")
+        assert len(seen) == 1
+        cfg = seen[0]
+        assert cfg.source == BoardSource("healthcare-9ierbt6f")
+        assert cfg.interim_dir == tmp_path / "interim"
+        assert cfg.raw_dir == tmp_path / "raw"
+        assert cfg.refresh and cfg.skip_existing_raw
+        assert cfg.max_pages == 50
+        assert app.busy
+        app.action_cancel()
+        assert app._cancel.is_set()
+        app._finish_operation()
+        app.query_one("#write-raw", Checkbox).value = False
+        await pilot.pause()
+        assert app.query_one("#skip-existing-raw").disabled
+        assert not app.query_one("#skip-existing-raw", Checkbox).value
+        app.query_one("#preset").value = CUSTOM
+        await pilot.pause()
+        app.query_one("#url").value = "https://hiringcafe.com/b/healthcare-9ierbt6f"
+        assert app._scrape_config().source == cfg.source
+        app.query_one("#query").value = "conflicting"
+        app.start_scrape()
+        assert len(seen) == 1

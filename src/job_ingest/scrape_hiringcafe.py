@@ -9,6 +9,9 @@ How it works (verified 2026-07-15):
   1. GET https://hiringcafe.com/          -> extract Next.js buildId from __NEXT_DATA__
   2. GET /_next/data/{buildId}/index.json?searchState={...}&page=N
         -> paginated search results ("ssrHits"), ~40+ jobs/page, no descriptions
+     Or /_next/data/{buildId}/b/{board_slug}.json?page=N for a shared Board.
+     Board pages are archived/cached in data/interim/YYYY/MM/DD/<slug>/pageN.json.gz.
+     --refresh bypasses today's cache; --interim-dir changes its root.
   3. GET /_next/data/{buildId}/job/x-{requisition_id}.json
         -> 308 redirect payload with the canonical job slug
   4. GET /_next/data/{buildId}/job/{canonical-slug}.json
@@ -20,11 +23,16 @@ Usage:
   python scrape_hiringcafe.py --url "https://hiringcafe.com/?searchState=..." --max-jobs 100
   python scrape_hiringcafe.py --query "data analyst" --no-descriptions   # fast, cards only
   python scrape_hiringcafe.py --preset DA_Healthcare --raw-dir data/raw/_json
+  python scrape_hiringcafe.py --preset Board_Healthcare --max-jobs 100
+  python scrape_hiringcafe.py --url https://hiringcafe.com/b/healthcare-9ierbt6f
 
 Tip: for filters (salary, remote, seniority...), set them in the hiringcafe.com UI,
 copy the URL from your address bar, and pass it via --url. The four searches that
 are used often enough to be worth naming ship as --preset keys; see
-SAVED_SEARCHES and docs/saved_hiringcafe_searches.md.
+SAVED_PRESETS and docs/saved_hiringcafe_searches.md. Board keys are
+Board_DS_SF_Remote, Board_DA_SF_Remote, Board_DA_Healthcare, Board_Healthcare.
+Defaults are 50 pages and 40 jobs. --skip-existing-raw requires --raw-dir and
+spends the job budget only on jobs not already staged.
 
 Example URL:
   https://hiringcafe.com/?searchState=%7B%22searchQuery%22%3A%22software%20engineer%22%7D
@@ -55,10 +63,12 @@ import tempfile
 import threading
 import time
 import unicodedata
+import zlib
 from collections import deque
 from collections.abc import Callable, Generator
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import date
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -80,6 +90,7 @@ USER_AGENT = (
 #: roots is its own design task; until then a staged ingest is an explicit
 #: `--json-dir data/raw/_json` with an intentionally chosen output directory.
 DEFAULT_RAW_DIR = Path("data/raw/_json")
+DEFAULT_INTERIM_DIR = Path("data/interim")
 
 
 class ScrapeError(RuntimeError):
@@ -313,6 +324,79 @@ def search_page(
     return props
 
 
+def _board_props(payload: dict[str, Any], page: int) -> dict[str, Any]:
+    props = payload.get("pageProps")
+    if not isinstance(props, dict):
+        raise ScrapeError(f"Board page {page} returned no pageProps object")
+    if props.get("ssrError"):
+        raise ScrapeError(f"Board page {page}: ssrError: {props['ssrError']}")
+    if not isinstance(props.get("hits"), list) or any(
+        not isinstance(hit, dict) for hit in props["hits"]
+    ):
+        raise ScrapeError(f"Board page {page} returned invalid hits")
+    for key in ("page", "totalCount", "pageSize", "companyCount"):
+        value = props.get(key)
+        if type(value) is not int or value < 0 or (key == "pageSize" and value == 0):
+            raise ScrapeError(f"Board page {page} returned invalid {key}")
+    if props["page"] != page or type(props.get("isLastPage")) is not bool:
+        raise ScrapeError(f"Board page {page} returned invalid paging metadata")
+    return props
+
+
+def board_page(
+    client: Client, build_id: str, slug: str, page: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    BoardSource(slug)
+    payload = _json_body(
+        client.get(f"{BASE}/_next/data/{build_id}/b/{slug}.json?page={page}")
+    )
+    return payload, _board_props(payload, page)
+
+
+def board_page_path(interim_dir: Path, run_date: date, slug: str, page: int) -> Path:
+    BoardSource(slug)
+    if page < 0:
+        raise ScrapeError("Board page must be nonnegative")
+    return interim_dir / run_date.strftime("%Y/%m/%d") / slug / f"page{page}.json.gz"
+
+
+def read_board_page(path: Path) -> dict[str, Any] | None:
+    """Read an exact cache entry, including legacy Selenium envelopes."""
+    try:
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        if not isinstance(payload, dict):
+            return None
+        payload = payload.get("props", payload)
+        if not isinstance(payload, dict) or not isinstance(
+            payload.get("pageProps"), dict
+        ):
+            return None
+        return payload
+    except (OSError, EOFError, ValueError, zlib.error):
+        return None
+
+
+def write_board_page(payload: dict[str, Any], path: Path) -> None:
+    """Archive the complete response verbatim with deterministic, atomic gzip."""
+    tmp_path = None
+    try:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(dir=path.parent, prefix=".board-", suffix=".part")
+        tmp_path = Path(name)
+        with os.fdopen(fd, "wb") as handle:
+            with gzip.GzipFile(filename="", fileobj=handle, mode="wb", mtime=0) as gz:
+                gz.write(body)
+        os.replace(tmp_path, path)
+    except (OSError, TypeError, ValueError) as e:
+        raise ScrapeError(f"cannot write Board page {path}: {e}") from e
+    finally:
+        if tmp_path is not None:
+            with suppress(OSError):
+                tmp_path.unlink(missing_ok=True)
+
+
 def fetch_job_detail(
     client: Client, build_id: str, requisition_id: str
 ) -> tuple[dict[str, Any] | None, str]:
@@ -532,6 +616,20 @@ def write_raw_page(
 
 # ------------------------------------------------------------- saved searches
 @dataclass(frozen=True, slots=True)
+class SearchSource:
+    search_state: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class BoardSource:
+    slug: str
+
+    def __post_init__(self) -> None:
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", self.slug):
+            raise ScrapeError(f"invalid Board slug: {self.slug!r}")
+
+
+@dataclass(frozen=True, slots=True)
 class SavedSearch:
     """One named HiringCafe search, stored as its exact encoded URL.
 
@@ -550,9 +648,15 @@ class SavedSearch:
     #: they all share is in SHARED_FILTERS, so this stays readable in a
     #: narrow panel.
     summary: str
+    kind: Literal["search", "board"] = "search"
+
+    def source(self) -> SearchSource | BoardSource:
+        return resolve_source(url=self.url)
 
     def search_state(self) -> dict[str, Any]:
         """A fresh, independently owned searchState dict."""
+        if self.kind != "search":
+            raise ScrapeError(f"{self.key} is a Board, not a search")
         return parse_search_state(None, self.url, None)
 
 
@@ -570,7 +674,7 @@ _SF_REMOTE = "SF within 100 miles or US remote"
 SAVED_SEARCHES: tuple[SavedSearch, ...] = (
     SavedSearch(
         key="DS_SF_Remote",
-        label="Data science - SF or US remote",
+        label="Search - Data science - SF or US remote",
         url=(
             "https://hiringcafe.com/?searchState=%7B%22locations%22%3A%5B%7B%22id%22%3A%226xk1yZQBoEtHp_8Uv-2X%22%2C%22types%22%3A%5B%22locality%22%5D%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22San+Francisco%22%2C%22short_name%22%3A%22San+Francisco%22%2C%22types%22%3A%5B%22locality%22%5D%7D%2C%7B%22long_name%22%3A%22California%22%2C%22short_name%22%3A%22CA%22%2C%22types%22%3A%5B%22administrative_area_level_1%22%5D%7D%2C%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22geometry%22%3A%7B%22location%22%3A%7B%22lat%22%3A37.77493%2C%22lon%22%3A-122.41942%7D%7D%2C%22formatted_address%22%3A%22San+Francisco%2C+CA%2C+US%22%2C%22population%22%3A864816%2C%22workplace_types%22%3A%5B%5D%2C%22options%22%3A%7B%22radius%22%3A100%2C%22radius_unit%22%3A%22miles%22%2C%22ignore_radius%22%3Afalse%7D%7D%2C%7B%22types%22%3A%5B%22country%22%5D%2C%22formatted_address%22%3A%22United+States%22%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22workplace_types%22%3A%5B%22Remote%22%5D%2C%22options%22%3A%7B%7D%2C%22id%22%3A%22United+Statescountry%22%7D%5D%2C%22commitmentTypes%22%3A%5B%22Full+Time%22%2C%22Contract%22%5D%2C%22dateFetchedPastNDays%22%3A1440%2C%22restrictJobsToTransparentSalaries%22%3Atrue%2C%22roleYoeRange%22%3A%5B0%2C6%5D%2C%22roleTypes%22%3A%5B%22Individual+Contributor%22%5D%2C%22doctorateDegreeRequirements%22%3A%5B%22Preferred%22%2C%22Not+Mentioned%22%5D%2C%22jobTitleQuery%22%3A%22%28%28data+OR+ml+OR+%5C%22machine+learning%5C%22+OR+%5C%22ai%5C%22+OR+%5C%22artificial+intelligence%5C%22+OR+nlp+OR+statistical+OR+bi+OR+%5C%22business+intelligence%5C%22+OR+devops+OR+mlops%29+AND+%28engineer+OR+scientist+OR+science+OR+programmer%29%29+AND+NOT+%5C%22software+engineer%5C%22+AND+NOT+%5C%22electrical+engineer%5C%22%5Cn%22%7D"
         ),
@@ -578,7 +682,7 @@ SAVED_SEARCHES: tuple[SavedSearch, ...] = (
     ),
     SavedSearch(
         key="DA_SF_Remote",
-        label="Data & analytics dept - SF or US remote",
+        label="Search - Data & analytics dept - SF or US remote",
         url=(
             "https://hiringcafe.com/?searchState=%7B%22locations%22%3A%5B%7B%22id%22%3A%226xk1yZQBoEtHp_8Uv-2X%22%2C%22types%22%3A%5B%22locality%22%5D%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22San+Francisco%22%2C%22short_name%22%3A%22San+Francisco%22%2C%22types%22%3A%5B%22locality%22%5D%7D%2C%7B%22long_name%22%3A%22California%22%2C%22short_name%22%3A%22CA%22%2C%22types%22%3A%5B%22administrative_area_level_1%22%5D%7D%2C%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22geometry%22%3A%7B%22location%22%3A%7B%22lat%22%3A37.77493%2C%22lon%22%3A-122.41942%7D%7D%2C%22formatted_address%22%3A%22San+Francisco%2C+CA%2C+US%22%2C%22population%22%3A864816%2C%22workplace_types%22%3A%5B%5D%2C%22options%22%3A%7B%22radius%22%3A100%2C%22radius_unit%22%3A%22miles%22%2C%22ignore_radius%22%3Afalse%7D%7D%2C%7B%22types%22%3A%5B%22country%22%5D%2C%22formatted_address%22%3A%22United+States%22%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22workplace_types%22%3A%5B%22Remote%22%5D%2C%22options%22%3A%7B%7D%2C%22id%22%3A%22United+Statescountry%22%7D%5D%2C%22commitmentTypes%22%3A%5B%22Full+Time%22%2C%22Contract%22%5D%2C%22dateFetchedPastNDays%22%3A1440%2C%22restrictJobsToTransparentSalaries%22%3Atrue%2C%22departments%22%3A%5B%22Data+and+Analytics%22%5D%2C%22roleYoeRange%22%3A%5B0%2C6%5D%2C%22roleTypes%22%3A%5B%22Individual+Contributor%22%5D%2C%22doctorateDegreeRequirements%22%3A%5B%22Preferred%22%2C%22Not+Mentioned%22%5D%7D"
         ),
@@ -586,7 +690,7 @@ SAVED_SEARCHES: tuple[SavedSearch, ...] = (
     ),
     SavedSearch(
         key="DS_Healthcare",
-        label="Data science - biotech & healthcare",
+        label="Search - Data science - biotech & healthcare",
         url=(
             "https://hiringcafe.com/?searchState=%7B%22locations%22%3A%5B%7B%22id%22%3A%226xk1yZQBoEtHp_8Uv-2X%22%2C%22types%22%3A%5B%22locality%22%5D%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22San+Francisco%22%2C%22short_name%22%3A%22San+Francisco%22%2C%22types%22%3A%5B%22locality%22%5D%7D%2C%7B%22long_name%22%3A%22California%22%2C%22short_name%22%3A%22CA%22%2C%22types%22%3A%5B%22administrative_area_level_1%22%5D%7D%2C%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22geometry%22%3A%7B%22location%22%3A%7B%22lat%22%3A37.77493%2C%22lon%22%3A-122.41942%7D%7D%2C%22formatted_address%22%3A%22San+Francisco%2C+CA%2C+US%22%2C%22population%22%3A864816%2C%22workplace_types%22%3A%5B%5D%2C%22options%22%3A%7B%22radius%22%3A100%2C%22radius_unit%22%3A%22miles%22%2C%22ignore_radius%22%3Afalse%7D%7D%2C%7B%22types%22%3A%5B%22country%22%5D%2C%22formatted_address%22%3A%22United+States%22%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22workplace_types%22%3A%5B%22Remote%22%2C%22Onsite%22%2C%22Hybrid%22%5D%2C%22options%22%3A%7B%7D%2C%22id%22%3A%22United+Statescountry%22%7D%5D%2C%22commitmentTypes%22%3A%5B%22Full+Time%22%2C%22Contract%22%5D%2C%22dateFetchedPastNDays%22%3A1440%2C%22restrictJobsToTransparentSalaries%22%3Atrue%2C%22industries%22%3A%5B%22biotechnology%22%2C%22healthcare%22%5D%2C%22roleYoeRange%22%3A%5B0%2C6%5D%2C%22roleTypes%22%3A%5B%22Individual+Contributor%22%5D%2C%22doctorateDegreeRequirements%22%3A%5B%22Preferred%22%2C%22Not+Mentioned%22%5D%2C%22jobTitleQuery%22%3A%22%28%28data+OR+ml+OR+%5C%22machine+learning%5C%22+OR+%5C%22ai%5C%22+OR+%5C%22artificial+intelligence%5C%22+OR+nlp+OR+statistical+OR+bi+OR+%5C%22business+intelligence%5C%22+OR+devops+OR+mlops%29+AND+%28engineer+OR+scientist+OR+science+OR+programmer%29%29+AND+NOT+%5C%22software+engineer%5C%22+AND+NOT+%5C%22electrical+engineer%5C%22%5Cn%22%7D"
         ),
@@ -597,7 +701,7 @@ SAVED_SEARCHES: tuple[SavedSearch, ...] = (
     ),
     SavedSearch(
         key="DA_Healthcare",
-        label="Data & analytics dept - biotech & healthcare",
+        label="Search - Data & analytics dept - biotech & healthcare",
         url=(
             "https://hiringcafe.com/?searchState=%7B%22locations%22%3A%5B%7B%22id%22%3A%226xk1yZQBoEtHp_8Uv-2X%22%2C%22types%22%3A%5B%22locality%22%5D%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22San+Francisco%22%2C%22short_name%22%3A%22San+Francisco%22%2C%22types%22%3A%5B%22locality%22%5D%7D%2C%7B%22long_name%22%3A%22California%22%2C%22short_name%22%3A%22CA%22%2C%22types%22%3A%5B%22administrative_area_level_1%22%5D%7D%2C%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22geometry%22%3A%7B%22location%22%3A%7B%22lat%22%3A37.77493%2C%22lon%22%3A-122.41942%7D%7D%2C%22formatted_address%22%3A%22San+Francisco%2C+CA%2C+US%22%2C%22population%22%3A864816%2C%22workplace_types%22%3A%5B%5D%2C%22options%22%3A%7B%22radius%22%3A100%2C%22radius_unit%22%3A%22miles%22%2C%22ignore_radius%22%3Afalse%7D%7D%2C%7B%22types%22%3A%5B%22country%22%5D%2C%22formatted_address%22%3A%22United+States%22%2C%22address_components%22%3A%5B%7B%22long_name%22%3A%22United+States%22%2C%22short_name%22%3A%22US%22%2C%22types%22%3A%5B%22country%22%5D%7D%5D%2C%22workplace_types%22%3A%5B%22Remote%22%5D%2C%22options%22%3A%7B%7D%2C%22id%22%3A%22United+Statescountry%22%7D%5D%2C%22commitmentTypes%22%3A%5B%22Full+Time%22%2C%22Contract%22%5D%2C%22dateFetchedPastNDays%22%3A1440%2C%22restrictJobsToTransparentSalaries%22%3Atrue%2C%22industries%22%3A%5B%22biotechnology%22%2C%22healthcare%22%5D%2C%22departments%22%3A%5B%22Data+and+Analytics%22%5D%2C%22roleYoeRange%22%3A%5B0%2C6%5D%2C%22roleTypes%22%3A%5B%22Individual+Contributor%22%5D%2C%22doctorateDegreeRequirements%22%3A%5B%22Preferred%22%2C%22Not+Mentioned%22%5D%7D"
         ),
@@ -610,26 +714,43 @@ SAVED_SEARCHES: tuple[SavedSearch, ...] = (
 
 def saved_search(key: str) -> SavedSearch:
     """Look up a preset by its stable key."""
-    for search in SAVED_SEARCHES:
+    for search in SAVED_PRESETS:
         if search.key == key:
             return search
-    valid = ", ".join(s.key for s in SAVED_SEARCHES)
+    valid = ", ".join(s.key for s in SAVED_PRESETS)
     raise ScrapeError(f"unknown preset {key!r}; valid keys are: {valid}")
 
 
 # ------------------------------------------------------------------- core API
+SAVED_BOARDS: tuple[SavedSearch, ...] = tuple(
+    SavedSearch(
+        key=f"Board_{key}",
+        label=f"Board - {label}",
+        url=f"{BASE}/b/{slug}",
+        summary=f"{slug}: filters owned by the saved Board; pages cached and archived by local date.",
+        kind="board",
+    )
+    for key, label, slug in (
+        ("DS_SF_Remote", "Data science - SF or US remote", "ds-sf-remote-77r5vzr1"),
+        ("DA_SF_Remote", "Data & analytics - SF or US remote", "da-sf-remote-tgl2fcys"),
+        ("DA_Healthcare", "Data & analytics - healthcare", "da-healthcare-awiifu1z"),
+        ("Healthcare", "Healthcare", "healthcare-9ierbt6f"),
+    )
+)
+SAVED_PRESETS = SAVED_SEARCHES + SAVED_BOARDS
+
+
 @dataclass(frozen=True, slots=True)
 class ScrapeConfig:
     """One scrape run.
 
-    `search_state` is always a concrete decoded dict: preset and CLI naming
-    are resolved before this is built, so the core generator stays unaware
-    of how a user expressed the search.
+    Source selection is resolved before traversal. The run date is fixed once
+    so a scrape crossing midnight keeps one archive directory.
     """
 
-    search_state: dict[str, Any]
+    source: SearchSource | BoardSource
     max_jobs: int = 40
-    max_pages: int = 25
+    max_pages: int = 50
     delay: float = 1.0
     descriptions: bool = True
     #: When set, each job is also written as an ingest-compatible page.
@@ -637,6 +758,18 @@ class ScrapeConfig:
     raw_dir: Path | None = None
     impersonate: str = "chrome"
     user_agent: str = USER_AGENT
+    interim_dir: Path = DEFAULT_INTERIM_DIR
+    refresh: bool = False
+    skip_existing_raw: bool = False
+    run_date: date = field(default_factory=date.today)
+
+    @property
+    def archive_dir(self) -> Path | None:
+        if isinstance(self.source, BoardSource):
+            return board_page_path(
+                self.interim_dir, self.run_date, self.source.slug, 0
+            ).parent.resolve()
+        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -671,8 +804,9 @@ def scrape(
     Callers should close it explicitly (``gen.close()`` in a ``finally``) so
     GeneratorExit runs deterministically instead of at GC time.
 
-    The only thing it writes is the raw corpus: an ingest-compatible
-    ``{requisition_id}.json.gz`` page per job when `config.raw_dir` is set.
+    Boards automatically archive full numbered page responses in the dated
+    interim cache. In addition, an ingest-compatible ``{requisition_id}.json.gz``
+    page per job is written when `config.raw_dir` is set.
     Closing the scrape->ingest loop is pipeline behaviour, not
     presentation, and the CLI and the dashboard must not diverge on it. Any
     other output is a caller's business -- `ev.hit` and `ev.detail` carry
@@ -689,6 +823,8 @@ def scrape(
         raise ScrapeError(f"max_jobs must be positive, got {config.max_jobs}")
     if config.max_pages <= 0:
         raise ScrapeError(f"max_pages must be positive, got {config.max_pages}")
+    if config.skip_existing_raw and config.raw_dir is None:
+        raise ScrapeError("--skip-existing-raw requires --raw-dir")
     if config.raw_dir is not None and not config.descriptions:
         raise ScrapeError(
             "--raw-dir requires descriptions: a search hit has no "
@@ -716,58 +852,144 @@ def _scrape(
 
     jobs = 0
     with_descriptions = 0
-    seen: set[Any] = set()
+    seen: set[str] = set()
     page = 0
-    try:
-        yield ScrapeEvent("build_id", "Bootstrapping buildId...")
-        build_id = get_build_id(client)
-        yield from drain()
-        yield ScrapeEvent("build_id", f"  buildId = {build_id}")
+    build_id: str | None = None
 
+    def bootstrap() -> Generator[ScrapeEvent, None, str]:
+        yield ScrapeEvent("build_id", "Bootstrapping buildId...")
+        value = get_build_id(client)
+        yield from drain()
+        yield ScrapeEvent("build_id", f"  buildId = {value}")
+        return value
+
+    def load_page(active_build: str) -> tuple[dict[str, Any], dict[str, Any]]:
+        if isinstance(config.source, BoardSource):
+            return board_page(client, active_build, config.source.slug, page)
+        return {}, search_page(client, active_build, config.source.search_state, page)
+
+    try:
         while jobs < config.max_jobs and page < config.max_pages:
-            yield ScrapeEvent("page", f"Search page {page}...", index=page)
-            try:
-                props = search_page(client, build_id, config.search_state, page)
-            except StaleBuildId:
-                yield ScrapeEvent(
-                    "warning",
-                    "  buildId went stale (site redeployed); re-bootstrapping...",
+            if client.cancelled:
+                raise ScrapeCancelled("cancelled between pages")
+            payload = None
+            path = None
+            if isinstance(config.source, BoardSource):
+                path = board_page_path(
+                    config.interim_dir, config.run_date, config.source.slug, page
                 )
-                build_id = get_build_id(client)
-                props = search_page(client, build_id, config.search_state, page)
+                if not config.refresh and path.exists():
+                    payload = read_board_page(path)
+                    if payload is not None:
+                        try:
+                            _board_props(payload, page)
+                        except ScrapeError:
+                            payload = None
+                    if payload is None:
+                        yield ScrapeEvent(
+                            "warning", f"  ! unreadable Board cache {path}; refetching"
+                        )
+            cached = payload is not None
+            if payload is None:
+                if build_id is None:
+                    build_id = yield from bootstrap()
+                if isinstance(config.source, SearchSource):
+                    yield ScrapeEvent("page", f"Search page {page}...", index=page)
+                try:
+                    payload, props = load_page(build_id)
+                except StaleBuildId:
+                    yield ScrapeEvent(
+                        "warning",
+                        "  buildId went stale (site redeployed); re-bootstrapping...",
+                    )
+                    build_id = yield from bootstrap()
+                    try:
+                        payload, props = load_page(build_id)
+                    except StaleBuildId as e:
+                        raise ScrapeError(
+                            f"page {page} unavailable after refreshing buildId"
+                        ) from e
+                if path is not None:
+                    write_board_page(payload, path)
+            else:
+                props = _board_props(payload, page)
             yield from drain()
 
-            hits = props.get("ssrHits") or []
-            if page == 0:
+            is_board = isinstance(config.source, BoardSource)
+            if isinstance(config.source, BoardSource):
+                origin = "cached" if cached else f"fetched -> {path}"
                 yield ScrapeEvent(
-                    "page", f"  {props.get('ssrTotalCount', '?')} total jobs match"
+                    "page",
+                    f"Board {config.source.slug} page {page} ({origin})...",
+                    index=page,
                 )
-            new_hits = [
-                h
-                for h in hits
-                if isinstance(h, dict)
-                and not h.get("is_hc_pinned")
-                and h.get("requisition_id")
-                and h.get("id") not in seen
-            ]
+                if props.get("archived"):
+                    yield ScrapeEvent("warning", "  ! Board is archived")
+                if page == 0 and isinstance(props.get("board"), dict):
+                    board = props["board"]
+                    for key in ("name", "tagline"):
+                        if board.get(key):
+                            yield ScrapeEvent("page", f"  Board {key}: {board[key]}")
+            hits = props.get("hits" if is_board else "ssrHits") or []
+            last_page = props.get("isLastPage" if is_board else "ssrIsLastPage")
+            if page == 0:
+                total = props.get("totalCount" if is_board else "ssrTotalCount", "?")
+                yield ScrapeEvent("page", f"  {total} total jobs match")
+            new_hits = []
+            missing_count = 0
+            for hit in hits:
+                if not isinstance(hit, dict):
+                    continue
+                if not hit.get("requisition_id"):
+                    missing_count += 1
+                    continue
+                # HiringCafe promotional pinning is a search-only concept.
+                # Board owner pinning is curated content and is kept.
+                if not is_board and hit.get("is_hc_pinned"):
+                    continue
+                identity = str(hit["requisition_id"])
+                if identity not in seen:
+                    seen.add(identity)
+                    new_hits.append(hit)
+            if missing_count:
+                yield ScrapeEvent(
+                    "warning",
+                    f"  {missing_count} hits without a requisition_id, skipped",
+                )
             yield ScrapeEvent("page", f"  {len(hits)} hits, {len(new_hits)} new")
-
+            pending_hits = []
+            skipped = 0
             for hit in new_hits:
+                name = raw_filename(str(hit["requisition_id"]))
+                if (
+                    config.skip_existing_raw
+                    and config.raw_dir is not None
+                    and name is not None
+                    and (config.raw_dir / name).exists()
+                ):
+                    skipped += 1
+                else:
+                    pending_hits.append(hit)
+            if skipped:
+                yield ScrapeEvent("page", f"  {skipped} already staged, skipped")
+
+            for hit in pending_hits:
                 if jobs >= config.max_jobs:
                     break
                 if client.cancelled:
                     raise ScrapeCancelled("cancelled between jobs")
-                seen.add(hit.get("id"))
                 detail = None
                 if config.descriptions:
+                    if build_id is None:
+                        build_id = yield from bootstrap()
                     try:
                         detail, _ = fetch_job_detail(
-                            client, build_id, hit["requisition_id"]
+                            client, build_id, str(hit["requisition_id"])
                         )
                     except StaleBuildId:
                         build_id = get_build_id(client)
                         detail, _ = fetch_job_detail(
-                            client, build_id, hit["requisition_id"]
+                            client, build_id, str(hit["requisition_id"])
                         )
                     except ScrapeCancelled:
                         raise
@@ -805,7 +1027,7 @@ def _scrape(
                     raw_path=raw_path,
                 )
 
-            if props.get("ssrIsLastPage") or not new_hits:
+            if last_page or not new_hits:
                 yield ScrapeEvent("page", "  last page reached.")
                 break
             page += 1
@@ -858,14 +1080,14 @@ def parse_search_state(
     return {}
 
 
-def resolve_search_state(
+def resolve_source(
     preset: str | None = None,
     query: str | None = None,
     url: str | None = None,
     search_state: str | None = None,
     on_warning: Callable[[str], None] = _noop,
-) -> dict[str, Any]:
-    """Turn the four mutually exclusive input modes into one searchState.
+) -> SearchSource | BoardSource:
+    """Turn the four mutually exclusive input modes into one source.
 
     Shared by the CLI and the dashboard so they cannot disagree on
     precedence. Supplying none of them keeps the long-standing default-feed
@@ -886,8 +1108,35 @@ def resolve_search_state(
             f"{' and '.join(supplied)} are mutually exclusive; supply at most one."
         )
     if preset:
-        return saved_search(preset).search_state()
-    return parse_search_state(query, url, search_state, on_warning)
+        return saved_search(preset).source()
+    if url:
+        try:
+            parsed = urlparse(url)
+        except ValueError as e:
+            raise ScrapeError(f"invalid --url: {e}") from e
+        if parsed.scheme not in ("https", "http") or parsed.netloc != "hiringcafe.com":
+            raise ScrapeError("--url must use the hiringcafe.com host")
+        if parsed.path.startswith("/b/"):
+            if "searchState" in parse_qs(parsed.query, keep_blank_values=True):
+                raise ScrapeError("Board URL and searchState are mutually exclusive")
+            return BoardSource(parsed.path.removeprefix("/b/"))
+        if parsed.path not in ("", "/"):
+            raise ScrapeError("--url has an unsupported HiringCafe path")
+    return SearchSource(parse_search_state(query, url, search_state, on_warning))
+
+
+def resolve_search_state(
+    preset: str | None = None,
+    query: str | None = None,
+    url: str | None = None,
+    search_state: str | None = None,
+    on_warning: Callable[[str], None] = _noop,
+) -> dict[str, Any]:
+    """Compatibility helper for callers explicitly requiring search state."""
+    source = resolve_source(preset, query, url, search_state, on_warning)
+    if isinstance(source, BoardSource):
+        raise ScrapeError("a Board has no caller-owned search state")
+    return source.search_state
 
 
 app = typer.Typer(
@@ -905,7 +1154,7 @@ def main(
     url: str | None = typer.Option(
         None,
         "--url",
-        help="a hiringcafe.com URL with searchState (set filters in the UI, copy the URL)",
+        help="a hiringcafe.com Board URL (/b/slug) or URL with searchState",
     ),
     search_state: str | None = typer.Option(
         None, "--search-state", help="raw searchState JSON string"
@@ -914,8 +1163,8 @@ def main(
         None,
         "--preset",
         help=(
-            "a saved search: "
-            + ", ".join(s.key for s in SAVED_SEARCHES)
+            "a saved search or Board: "
+            + ", ".join(s.key for s in SAVED_PRESETS)
             + " (mutually exclusive with --query/--url/--search-state)"
         ),
     ),
@@ -927,7 +1176,14 @@ def main(
         USER_AGENT,
         help="Honest JobScout UA by default; empty uses the browser profile UA",
     ),
-    max_pages: int = typer.Option(25, "--max-pages"),
+    max_pages: int = typer.Option(50, "--max-pages"),
+    interim_dir: Path = typer.Option(
+        DEFAULT_INTERIM_DIR, help="Board archive and same-day cache root"
+    ),
+    refresh: bool = typer.Option(False, help="Refetch today's cached Board pages"),
+    skip_existing_raw: bool = typer.Option(
+        False, help="Skip jobs already staged in --raw-dir"
+    ),
     delay: float = typer.Option(
         1.0, "--delay", help="seconds between requests (default 1.0)"
     ),
@@ -958,9 +1214,7 @@ def main(
 
     try:
         config = ScrapeConfig(
-            search_state=resolve_search_state(
-                preset, query, url, search_state, on_warning=warn
-            ),
+            source=resolve_source(preset, query, url, search_state, on_warning=warn),
             max_jobs=max_jobs,
             max_pages=max_pages,
             delay=delay,
@@ -968,6 +1222,9 @@ def main(
             raw_dir=raw_dir,
             impersonate=impersonate,
             user_agent=user_agent,
+            interim_dir=interim_dir,
+            refresh=refresh,
+            skip_existing_raw=skip_existing_raw,
         )
         if preset:
             chosen = saved_search(preset)
@@ -975,6 +1232,8 @@ def main(
             print(f"Preset {chosen.key}: {chosen.summary}")
         if raw_dir is not None:
             print(f"Writing raw pages to {raw_dir.resolve()}")
+        if config.archive_dir is not None:
+            print(f"Board archive/cache: {config.archive_dir}")
         events = scrape(config)
     except ScrapeError as e:
         sys.exit(str(e))

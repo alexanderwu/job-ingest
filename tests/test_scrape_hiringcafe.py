@@ -21,6 +21,8 @@ import pytest
 from job_ingest.ingest_and_benchmark import run_fastingest
 from job_ingest.scrape_hiringcafe import (
     SAVED_SEARCHES,
+    SAVED_BOARDS,
+    SearchSource,
     Client,
     ScrapeCancelled,
     ScrapeConfig,
@@ -289,7 +291,7 @@ class _Resp:
 
 class TestScrape:
     def test_the_event_sequence_is_what_a_frontend_expects(self) -> None:
-        events = list(scrape(ScrapeConfig({}, max_jobs=4), StubClient()))
+        events = list(scrape(ScrapeConfig(SearchSource(), max_jobs=4), StubClient()))
         kinds = [e.kind for e in events]
 
         assert kinds[0] == "build_id"
@@ -301,7 +303,10 @@ class TestScrape:
 
     def test_max_jobs_is_honoured_across_pages(self) -> None:
         events = list(
-            scrape(ScrapeConfig({}, max_jobs=3), StubClient(pages=5, jobs_per_page=2))
+            scrape(
+                ScrapeConfig(SearchSource(), max_jobs=3),
+                StubClient(pages=5, jobs_per_page=2),
+            )
         )
 
         assert sum(1 for e in events if e.kind == "job") == 3
@@ -309,14 +314,14 @@ class TestScrape:
     def test_max_pages_bounds_the_walk(self) -> None:
         client = StubClient(pages=99, jobs_per_page=1)
 
-        list(scrape(ScrapeConfig({}, max_jobs=999, max_pages=2), client))
+        list(scrape(ScrapeConfig(SearchSource(), max_jobs=999, max_pages=2), client))
 
         assert sum(1 for u in client.urls if "index.json" in u) == 2
 
     def test_it_writes_nothing_without_a_raw_dir(self, tmp_path: Path) -> None:
         """The raw corpus is the only thing a scrape writes, and only when
         it is asked to; anything else is the caller's business."""
-        list(scrape(ScrapeConfig({}, max_jobs=2), StubClient()))
+        list(scrape(ScrapeConfig(SearchSource(), max_jobs=2), StubClient()))
 
         assert list(tmp_path.iterdir()) == []
 
@@ -324,7 +329,9 @@ class TestScrape:
         """Closing the scrape->ingest loop is pipeline behaviour, so the CLI
         and the dashboard cannot diverge on it."""
         events = list(
-            scrape(ScrapeConfig({}, max_jobs=2, raw_dir=tmp_path), StubClient())
+            scrape(
+                ScrapeConfig(SearchSource(), max_jobs=2, raw_dir=tmp_path), StubClient()
+            )
         )
 
         written = [e.raw_path for e in events if e.kind == "job"]
@@ -345,7 +352,9 @@ class TestScrape:
                 return resp
 
         events = list(
-            scrape(ScrapeConfig({}, max_jobs=1, raw_dir=tmp_path), Incomplete())
+            scrape(
+                ScrapeConfig(SearchSource(), max_jobs=1, raw_dir=tmp_path), Incomplete()
+            )
         )
 
         warnings = [e.message for e in events if e.kind == "warning"]
@@ -357,13 +366,13 @@ class TestScrape:
         in schema.rs; a synthesised page would fail validation or silently
         store an empty description."""
         with pytest.raises(ScrapeError, match="requires descriptions"):
-            scrape(ScrapeConfig({}, descriptions=False, raw_dir=tmp_path))
+            scrape(ScrapeConfig(SearchSource(), descriptions=False, raw_dir=tmp_path))
 
     def test_configuration_is_validated_eagerly(self) -> None:
         """Not on first iteration: a bad config is the caller's mistake and
         should surface where it was made."""
         with pytest.raises(ScrapeError, match="max_jobs must be positive"):
-            scrape(ScrapeConfig({}, max_jobs=0))
+            scrape(ScrapeConfig(SearchSource(), max_jobs=0))
 
     def test_an_unrecognisable_homepage_raises_rather_than_exits(self) -> None:
         class NoBuildId(StubClient):
@@ -371,7 +380,7 @@ class TestScrape:
                 return _Resp(text="<html>nothing here</html>")
 
         with pytest.raises(ScrapeError, match="buildId"):
-            list(scrape(ScrapeConfig({}), NoBuildId()))
+            list(scrape(ScrapeConfig(SearchSource()), NoBuildId()))
 
     def test_cancellation_stops_after_the_current_request(self) -> None:
         """Cooperative, not instant: the promise is 'after the current
@@ -379,7 +388,7 @@ class TestScrape:
         cancel = threading.Event()
         client = StubClient(pages=9, jobs_per_page=5, cancel=cancel)
         events = []
-        for event in scrape(ScrapeConfig({}, max_jobs=99), client):
+        for event in scrape(ScrapeConfig(SearchSource(), max_jobs=99), client):
             events.append(event)
             if event.kind == "job":
                 cancel.set()
@@ -389,7 +398,7 @@ class TestScrape:
         assert sum(1 for e in events if e.kind == "job") == 1
 
     def test_closing_the_generator_runs_cleanup_deterministically(self) -> None:
-        gen = scrape(ScrapeConfig({}, max_jobs=99), StubClient(pages=9))
+        gen = scrape(ScrapeConfig(SearchSource(), max_jobs=99), StubClient(pages=9))
         next(gen)
 
         gen.close()
@@ -409,7 +418,7 @@ class TestScrape:
                     self._on_warning("  ! HTTP 503, backing off 5s...")
                 return super().get(url, retries)
 
-        events = list(scrape(ScrapeConfig({}, max_jobs=1), Flaky()))
+        events = list(scrape(ScrapeConfig(SearchSource(), max_jobs=1), Flaky()))
 
         assert any("503" in e.message for e in events if e.kind == "warning")
 
@@ -481,12 +490,19 @@ class TestSavedSearches:
         """A repository-only drift guard: docs/ is the human-readable
         provenance, but the packaged registry is what runs, and an edit to
         one must not silently diverge from the other."""
-        text = DOCS.read_text(encoding="utf-8")
+        text = DOCS.read_text(encoding="utf-8").split("# Searches", 1)[1]
         documented = dict(
             re.findall(r"^## (\S+)\s*\n\s*\n(https://\S+)\s*$", text, re.MULTILINE)
         )
 
         assert documented == {s.key: s.url for s in SAVED_SEARCHES}
+        boards = DOCS.read_text(encoding="utf-8").split("# Searches", 1)[0]
+        documented_boards = dict(
+            re.findall(r"^## (\S+)\s*\n\s*\n(https://\S+)\s*$", boards, re.MULTILINE)
+        )
+        assert documented_boards == {
+            s.key.removeprefix("Board_"): s.url for s in SAVED_BOARDS
+        }
 
 
 class TestResolveSearchState:

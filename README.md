@@ -107,7 +107,7 @@ ignored, so their rows remain until the next full rebuild.
 - `src/job_ingest/scrape_hiringcafe.py` scrapes hiringcafe.com. `scrape()` is a
   synchronous generator of `ScrapeEvent`, raises `ScrapeError`, never prints,
   and writes ingest-compatible raw pages when given a `--raw-dir`. It also
-  carries the four saved-search presets.
+  carries four saved-search and four Board presets, with dated Board page caching.
 - `src/job_ingest/stats.py` answers "what is in the corpus?" as frozen
   dataclasses: overview, fill rates, breakdowns, tools, compensation, recency
   and a paged search. It never caches a DuckDB connection — the lock is
@@ -157,15 +157,21 @@ sidecar into DuckDB and is deleted after loading.
 # One of the four saved searches (see docs/saved_hiringcafe_searches.md).
 just scrape --preset DS_SF_Remote --max-jobs 100
 
-# Stage ingest-compatible raw pages. Without --raw-dir a scrape only logs.
+# Stage ingest-compatible raw pages.
 just scrape --preset DA_Healthcare --max-jobs 50 --raw-dir data/raw/_json
 
 # Ad hoc: at most one of --query, --url, --search-state, --preset.
 just scrape --query "data analyst" --max-jobs 40
 just scrape --url "https://hiringcafe.com/?searchState=..."
+
+# Boards are automatically archived and cached, even without --raw-dir.
+just scrape --preset Board_Healthcare --max-pages 10 --max-jobs 500
+just scrape --url https://hiringcafe.com/b/healthcare-9ierbt6f
+just scrape --preset Board_Healthcare --refresh --interim-dir data/interim
+just scrape --preset Board_Healthcare --raw-dir data/raw/_json --skip-existing-raw
 ```
 
-`--preset` keys, all sharing the saved full-time/contract, transparent-salary,
+Search `--preset` keys, all sharing the saved full-time/contract, transparent-salary,
 0-6-years, individual-contributor, doctorate-optional, last-1,440-days filters:
 
 | Key | Roles | Geography / workplace | Industry |
@@ -174,6 +180,53 @@ just scrape --url "https://hiringcafe.com/?searchState=..."
 | `DA_SF_Remote` | `Data and Analytics` department | SF within 100 miles, or US remote | any |
 | `DS_Healthcare` | Same Data/ML titles | SF within 100 miles, or US remote/onsite/hybrid | biotech or healthcare |
 | `DA_Healthcare` | `Data and Analytics` department | SF within 100 miles, or US remote | biotech or healthcare |
+
+Board presets have owner-maintained filters, separate from those saved searches:
+
+| Key | Board slug |
+| --- | --- |
+| `Board_DS_SF_Remote` | `ds-sf-remote-77r5vzr1` |
+| `Board_DA_SF_Remote` | `da-sf-remote-tgl2fcys` |
+| `Board_DA_Healthcare` | `da-healthcare-awiifu1z` |
+| `Board_Healthcare` | `healthcare-9ierbt6f` |
+
+The two independent output pipelines are:
+
+```text
+Board endpoint -> data/interim/YYYY/MM/DD/<board>/pageN.json.gz (also the cache)
+Job detail     -> --raw-dir/<requisition_id>.json.gz -> fastingest
+```
+
+`--interim-dir` changes the Board archive root (default `data/interim`). Pages
+are saved verbatim, including Board metadata, before any detail requests.
+These Board archives are not direct input to the current ingest sidecar.
+Search pages have no interim cache. JSONL and `--raw-dir` remain optional,
+independent outputs; `--no-descriptions` still archives Board pages.
+
+Each run fixes its local date once. Exact numbered pages from that day are
+reused without page requests or delays; yesterday's pages are never reused.
+Unreadable entries warn and are refetched. `--refresh` refetches and atomically
+replaces each visited page, retaining higher-numbered pages from earlier runs.
+A day's cache can mix capture times: totals may differ and moving page boundaries
+can omit a job. Use `--refresh` for a fresh capture; the live endpoint can still
+shift while paging. Board-owner pinned jobs are retained.
+
+The page guard now defaults to 50, enough for typical full Board pulls; the job
+budget remains 40 to keep detail requests bounded. A default Board run reads
+page 0 and stops at 40 jobs. Increase `--max-jobs` to go deeper; cached pages make
+resuming inexpensive.
+
+`--skip-existing-raw` requires `--raw-dir` and skips already-staged jobs before
+detail requests, spending the job budget on new jobs. Skipped files retain their
+description, `is_expired` value and mtime, so incremental ingest does not rerun
+for them. Drop the flag to refresh those jobs.
+
+The transport uses `curl_cffi`. `--impersonate chrome` (default) selects a Chrome
+TLS handshake with the honest, attributable JobScout user agent. This combination
+can be detected as a mismatch: `--user-agent ""` uses the browser profile's UA,
+and `--user-agent TEXT` supplies a custom UA. `--impersonate none` disables TLS
+impersonation. HTTP 403 fails fast with profile guidance; 429 and server errors
+retain retry backoff. Rotating UAs, proxies and Selenium fallback are out of scope.
 
 `--preset` is mutually exclusive with `--query`, `--url` and `--search-state`;
 supplying none of them keeps the default feed. The packaged registry stores the
@@ -188,6 +241,10 @@ page synthesised without one would either fail validation or store an empty
 description. In the dashboard the corresponding toggles are kept consistent for
 the same reason.
 
+`requisition_id` is the single job identity: the string-valued dedup key within
+a run, the `--raw-dir` filename and the key checked by `--skip-existing-raw`.
+Case and whitespace are preserved; `collapse_key` is not an identity key.
+
 Raw pages are saved **verbatim**, including Firebase user-activity UIDs. That
 is an explicit, accepted privacy tradeoff for this corpus; nothing scrubs or
 transforms them. Filenames follow the `{requisition_id}.json.gz` convention
@@ -200,6 +257,7 @@ filename would silently lose a row.
 ```powershell
 just dash                      # or: job-dash
 just dash --out-dir data/processed --json-dir data/raw/json
+just dash --interim-dir data/interim
 ```
 
 A Textual TUI. One screen, three tabs, all mounted at once so a running scrape
@@ -212,9 +270,11 @@ terminal app; run it.
   compensation percentiles and column fill rates, plus a 24-month recency
   sparkline.
 - **Run** — an ingest panel (full rebuild, Parquet, limit), a scrape panel
-  (preset selector or Custom inputs, max jobs/pages, delay, "write raw pages"),
+  (eight presets or Custom search/Board inputs, max jobs/pages, delay,
+  "Write raw pages", "Refetch cached pages", "Skip jobs already staged"),
   one shared log, a progress bar, Cancel, and a result summary. Both resolved
-  paths are shown together because they intentionally differ.
+  paths and the Board archive root are shown together. Skipping staged jobs is
+  enabled only when raw writing is on; both cache controls default off.
 - **Browse** — search, an "include expired" toggle, a paged table of 200 rows
   at a time, a detail pane, and Previous/Next.
 

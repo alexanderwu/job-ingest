@@ -43,7 +43,7 @@ every stats query and the whole run_ingest call take one process-local
 lock here.
 
 Cancellation is cooperative and the UI says so. worker.cancel() cannot
-interrupt a blocking requests.get or subprocess.run. A scrape stops after
+interrupt a blocking Client.get or subprocess.run. A scrape stops after
 its current request; an ingest is not cancellable at all, so its Cancel
 button stays disabled rather than lying.
 
@@ -89,13 +89,14 @@ from job_ingest import stats
 from job_ingest.ingest_and_benchmark import IngestError, IngestResult, run_ingest
 from job_ingest.scrape_hiringcafe import (
     DEFAULT_RAW_DIR,
-    SAVED_SEARCHES,
+    SAVED_PRESETS,
+    DEFAULT_INTERIM_DIR,
     SHARED_FILTERS,
     Client,
     ScrapeConfig,
     ScrapeError,
     ScrapeEvent,
-    resolve_search_state,
+    resolve_source,
     saved_search,
     scrape,
 )
@@ -338,6 +339,7 @@ class Dashboard(App[None]):
         out_dir: Path = DEFAULT_OUT_DIR,
         json_dir: Path = DEFAULT_JSON_DIR,
         raw_dir: Path = DEFAULT_RAW_DIR,
+        interim_dir: Path = DEFAULT_INTERIM_DIR,
     ) -> None:
         super().__init__()
         # No stat() here: data/ is gitignored, so a fresh clone has no DB and
@@ -346,6 +348,7 @@ class Dashboard(App[None]):
         self.out_dir = out_dir
         self.json_dir = json_dir
         self.raw_dir = raw_dir
+        self.interim_dir = interim_dir
         # Serialises every corpus read against this process's own DuckDB
         # writer. Short-lived connections alone cannot close that race.
         self._db_lock = threading.Lock()
@@ -376,9 +379,9 @@ class Dashboard(App[None]):
                     with Vertical(id="scrape-panel"):
                         yield Label("Scrape")
                         yield Select(
-                            [(s.label, s.key) for s in SAVED_SEARCHES]
+                            [(s.label, s.key) for s in SAVED_PRESETS]
                             + [("Custom", CUSTOM)],
-                            value=SAVED_SEARCHES[0].key,
+                            value=SAVED_PRESETS[0].key,
                             allow_blank=False,
                             id="preset",
                         )
@@ -392,10 +395,16 @@ class Dashboard(App[None]):
                                 value="40", placeholder="max jobs", id="max-jobs"
                             )
                             yield Input(
-                                value="25", placeholder="max pages", id="max-pages"
+                                value="50", placeholder="max pages", id="max-pages"
                             )
                             yield Input(value="1.0", placeholder="delay s", id="delay")
                         yield Checkbox("Write raw pages", id="write-raw")
+                        yield Checkbox("Refetch cached pages", id="refresh")
+                        yield Checkbox(
+                            "Skip jobs already staged",
+                            id="skip-existing-raw",
+                            disabled=True,
+                        )
                         yield Button("Run scrape", id="run-scrape", variant="primary")
                 with Horizontal(id="run-status"):
                     yield ProgressBar(id="progress", show_eta=False)
@@ -421,7 +430,7 @@ class Dashboard(App[None]):
         for column in stats.JOB_ROW_COLUMNS:
             table.add_column(column.replace("_", " "), key=column)
         self.query_one("#paths", Static).update(self._paths_note())
-        self._show_preset_summary(SAVED_SEARCHES[0].key)
+        self._show_preset_summary(SAVED_PRESETS[0].key)
         self._set_custom_inputs_enabled(False)
         self.busy = False
         self.cancellable = False
@@ -441,6 +450,7 @@ class Dashboard(App[None]):
         return (
             f"ingest reads {self.json_dir.resolve()}  |  "
             f"scrape writes {self.raw_dir.resolve()}\n"
+            f"Board archive/cache root {self.interim_dir.resolve()}\n"
             f"corpus DB    {self.db_path.resolve()}\n"
             "Those differ on purpose: a default scrape is staged, not "
             "ingested. Point --json-dir at it to ingest it."
@@ -517,6 +527,10 @@ class Dashboard(App[None]):
             self.offset = 0
             self.load_page()
         elif event.checkbox.id == "write-raw":
+            skip = self.query_one("#skip-existing-raw", Checkbox)
+            skip.disabled = not event.value
+            if not event.value:
+                skip.value = False
             # A search hit has no description, so a raw page cannot be
             # synthesised without one. Keep the two settings consistent.
             self.query_one(
@@ -627,6 +641,8 @@ class Dashboard(App[None]):
             self.log_line(f"preset {chosen.key}: {chosen.summary}")
         if config.raw_dir is not None:
             self.log_line(f"writing raw pages to {config.raw_dir.resolve()}")
+        if config.archive_dir is not None:
+            self.log_line(f"Board archive/cache: {config.archive_dir}")
         self._cancel = threading.Event()
         self.busy = True
         self.cancellable = True
@@ -638,16 +654,19 @@ class Dashboard(App[None]):
     def _scrape_config(self) -> ScrapeConfig:
         key = str(self.query_one("#preset", Select).value)
         if key == CUSTOM:
-            search_state = resolve_search_state(
+            source = resolve_source(
                 query=self.query_one("#query", Input).value.strip() or None,
                 url=self.query_one("#url", Input).value.strip() or None,
                 search_state=self.query_one("#state", Input).value.strip() or None,
                 on_warning=self.log_line,
             )
         else:
-            search_state = saved_search(key).search_state()
+            source = saved_search(key).source()
         return ScrapeConfig(
-            search_state=search_state,
+            source=source,
+            interim_dir=self.interim_dir,
+            refresh=self.query_one("#refresh", Checkbox).value,
+            skip_existing_raw=self.query_one("#skip-existing-raw", Checkbox).value,
             max_jobs=self._int_input("max-jobs"),
             max_pages=self._int_input("max-pages"),
             delay=self._float_input("delay"),
@@ -819,6 +838,9 @@ class Dashboard(App[None]):
             else saved_search(key).summary
         )
         self.query_one("#preset-summary", Static).update(summary)
+        self.query_one("#shared-filters", Static).display = (
+            key != CUSTOM and saved_search(key).kind == "search"
+        )
 
 
 def main() -> None:
@@ -847,12 +869,19 @@ def main() -> None:
         default=DEFAULT_RAW_DIR,
         help="where a scrape stages raw pages",
     )
+    parser.add_argument(
+        "--interim-dir",
+        type=Path,
+        default=DEFAULT_INTERIM_DIR,
+        help="Board archive and cache root",
+    )
     args = parser.parse_args()
     Dashboard(
         db_path=args.db if args.db is not None else args.out_dir / "jobs.duckdb",
         out_dir=args.out_dir,
         json_dir=args.json_dir,
         raw_dir=args.raw_dir,
+        interim_dir=args.interim_dir,
     ).run()
 
 

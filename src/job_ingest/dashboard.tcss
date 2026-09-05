@@ -35,7 +35,13 @@ Screen {
 #paths {
     padding: 0 2;
     background: $panel;
-    height: 3;
+    height: auto;
+}
+
+#scrape-panel Checkbox {
+    height: 1;
+    border: none;
+    padding: 0;
 }
 
 #run-panels {
