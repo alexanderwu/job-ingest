@@ -29,9 +29,9 @@ import pytest
 
 from textual.widgets import TabbedContent
 
-from job_ingest.dashboard import CUSTOM, PAGE_SIZE, Dashboard, bar
+from job_ingest.dashboard import CUSTOM, DEFAULT_JSON_DIR, PAGE_SIZE, Dashboard, bar
 from job_ingest.ingest_and_benchmark import DUCKDB_DDL, IngestError, IngestResult
-from job_ingest.scrape_hiringcafe import SAVED_PRESETS, ScrapeConfig
+from job_ingest.scrape_hiringcafe import DEFAULT_RAW_DIR, SAVED_PRESETS, ScrapeConfig
 from job_ingest.stats import JOB_ROW_COLUMNS
 
 CANNED = IngestResult(
@@ -52,6 +52,10 @@ CANNED = IngestResult(
     duckdb_bytes=2048,
     parquet_bytes=None,
 )
+
+
+def test_default_scrape_and_ingest_dirs_share_the_raw_corpus() -> None:
+    assert DEFAULT_JSON_DIR == DEFAULT_RAW_DIR == Path("data/raw/json")
 
 
 def a_corpus(tmp_path: Path, rows: int = 3, expired: int = 1) -> Path:

@@ -255,7 +255,7 @@ def test_requisition_identity_for_both_sources(tmp_path, board):
     assert hc.raw_filename("Case") != hc.raw_filename("case")
 
 
-def test_skip_staged_does_not_stop_or_spend_budget(tmp_path):
+def test_skip_existing_does_not_stop_or_spend_budget(tmp_path):
     raw = tmp_path / "raw"
     hc.write_raw_page(a_job("old"), raw)
     old = raw / hc.raw_filename("old")
@@ -276,7 +276,7 @@ def test_skip_staged_does_not_stop_or_spend_budget(tmp_path):
     assert [e.hit["requisition_id"] for e in jobs(events)] == ["new"]
     assert not any("/job/x-old" in u for u in client.urls)
     assert any("/job/x-new" in u for u in client.urls)
-    assert sum("already staged" in e.message for e in events) == 1
+    assert sum("already present" in e.message for e in events) == 1
     assert old.stat().st_mtime_ns == mtime
 
 
@@ -339,7 +339,7 @@ def test_yesterday_is_not_a_cache_hit(tmp_path):
     assert hc.read_board_page(yesterday)["pageProps"]["hits"] == []
 
 
-def test_cached_staged_board_is_entirely_offline(tmp_path):
+def test_cached_existing_board_is_entirely_offline(tmp_path):
     raw = tmp_path / "raw"
     hc.write_raw_page(a_job(), raw)
     hc.write_board_page(envelope(), hc.board_page_path(tmp_path, DAY, SLUG, 0))
@@ -350,7 +350,7 @@ def test_cached_staged_board_is_entirely_offline(tmp_path):
     events = list(hc.scrape(cfg, client))
     assert not jobs(events)
     assert client._last_request == 0
-    assert any("1 already staged" in e.message for e in events)
+    assert any("1 already present" in e.message for e in events)
 
 
 def test_cross_page_duplicate_fetches_detail_once(tmp_path):

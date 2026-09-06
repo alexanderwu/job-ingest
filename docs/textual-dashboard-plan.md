@@ -57,8 +57,8 @@ shell and a second frontend later is cheap.
 
 ## Confirmed product decisions
 
-- Scraped raw pages go to `data/raw/_json/` for now, **not** the existing
-  `data/raw/json` symlink into `Dev/job-search/data/cache/json`.
+- Scraped raw pages go directly to `data/raw/json/`, the corpus read by the
+  default ingest.
 - Raw job objects are saved verbatim, including Firebase/user-activity fields.
   This is an explicit privacy tradeoff; do not silently scrub or transform them.
 - The dashboard permits only one pipeline operation (scrape or ingest) at a
@@ -73,16 +73,11 @@ shell and a second frontend later is cheap.
   "include expired" toggle.
   influence dependencies, tests, or implementation decisions.
 
-**Known source-directory discrepancy:** the established ingest default remains
-`data/raw/json/`, while new scrapes are staged in `data/raw/_json/`. Therefore a
-default scrape followed by a default ingest does **not yet** consume the new
-files. The dashboard must state this plainly and display both resolved paths.
-Do not silently switch the ingest source or combine directories: the manifest is
-keyed only by filename, and alternating input roots against one output directory
-can overwrite newer rows with older copies. For now, ingesting staged files is
-an explicit operation using `--json-dir data/raw/_json` and an intentionally
-chosen output directory. Reconciling/merging the two corpus roots is a follow-up
-design task.
+**Shared raw corpus:** the default scraper and ingest both use
+`data/raw/json/`, so a default scrape followed by a default ingest consumes the
+new files. The dashboard displays both resolved paths so an explicit override
+is visible. Because the manifest is keyed only by filename, use a distinct
+output directory when intentionally ingesting a separate `--json-dir` corpus.
 
 ## Step 1 — Dependencies and scaffolding
 
@@ -422,11 +417,10 @@ search `hit` lacks `job_information.description`, a non-`Option` `String` in
 descriptions. In the TUI, disable the "no descriptions" toggle when "write to
 corpus" is checked.
 
-**4d. CLI and staging path:** `--raw-dir PATH` remains opt-in. The dashboard's
-"write raw pages" checkbox targets `data/raw/_json/` by default and displays its
-resolved absolute path before starting. Do not call this directory the active
-corpus and do not default it to the `data/raw/json` symlink. The known
-source-directory discrepancy at the top of this plan applies.
+**4d. CLI raw-corpus path:** `--raw-dir PATH` remains opt-in. The dashboard's
+"write raw pages" checkbox targets `data/raw/json/` by default and displays its
+resolved absolute path before starting. This is the active corpus read by the
+default ingest.
 
 **4e. Saved-search registry.** Add a small typed registry (in
 `scrape_hiringcafe.py`, or a sibling `saved_searches.py` if keeping the scraper
@@ -682,11 +676,8 @@ bounded by `wait_for_complete()`. Don't add `pytest-timeout`.
 
 ## Step 7 — Documentation
 
-`README.md`: extend the Architecture block with the scrape staging flow
-(`hiringcafe.com ──job-scrape --raw-dir──▶ data/raw/_json/*.json.gz`) and
-separately show that the current default ingest still reads the
-`data/raw/json` symlink. Call this a staging loop, not a fully automatic closed
-loop, until the source-directory discrepancy is reconciled;
+`README.md`: extend the Architecture block with the direct scrape-to-ingest flow
+(`hiringcafe.com ──job-scrape --raw-dir──▶ data/raw/json/*.json.gz`);
 add a Dashboard section (three panes, keybindings, no screenshot — it's a TUI);
 add `stats.py` and `dashboard.py` to Components; add `just dash` to Usage;
 document the four `--preset` keys, the dashboard's one-search-per-run behavior,
@@ -725,15 +716,15 @@ Step 4a (the spike) gates step 4.
   ingest runs and streams to the log then refreshes stats, browse pages through
   active rows by default, scrape runs and cancels after its current request, and
   a second operation cannot start while one is active. Confirm the UI displays
-  the differing resolved scrape-output and ingest-input paths. Then `just dash`
+  the resolved scrape-output and ingest-input paths. Then `just dash`
   with `data/` renamed away, to confirm the empty-state path.
 - Close any stray `duckdb.exe` before testing — one will hold
   `data/processed/jobs.duckdb` exclusively and every read will fail.
 
 ## Resolved implementation decisions
 
-- New scraped pages are staged in `data/raw/_json/`; never write them through
-  the `data/raw/json` symlink. The path mismatch remains visible and documented.
+- New scraped pages are written to `data/raw/json/`, the corpus consumed by the
+  default ingest.
 - Preserve raw job objects verbatim, including Firebase user-activity UIDs.
 - Run only one scrape or ingest operation at a time.
 - Ship the four named HiringCafe presets with both CLI and dashboard access;
@@ -749,9 +740,9 @@ Step 4a (the spike) gates step 4.
 - **Caching a DuckDB connection on the App** — breaks the TUI's own ingest.
 - **Promising instant cancellation** — cooperative only; don't restructure
   ingest into a killable subprocess to fake it.
-- **Silently merging or alternating `data/raw/json` and `data/raw/_json`** — the
-  manifest namespace is filename-only, so source reconciliation needs its own
-  design.
+- **Alternating separate input roots against one output directory** — the
+  manifest namespace is filename-only, so use a distinct output directory for
+  a deliberately separate corpus.
 - **An implicit "run all saved searches" batch** — overlapping results require
   explicit deduplication, progress, output, and partial-failure contracts.
 - **New deps `pytest-asyncio`, `pytest-timeout`, `plotext`, `pandas`** — the

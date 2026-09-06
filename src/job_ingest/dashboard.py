@@ -102,8 +102,7 @@ from job_ingest.scrape_hiringcafe import (
 )
 
 DEFAULT_OUT_DIR = Path("data/processed")
-#: The established ingest source. Deliberately different from
-#: DEFAULT_RAW_DIR, where new scrapes are staged -- see _paths_note().
+#: Scrapes and ingests share one raw-job corpus.
 DEFAULT_JSON_DIR = Path("data/raw/json")
 PAGE_SIZE = 200
 #: The Select value meaning "use the query/URL/raw-JSON inputs below".
@@ -401,7 +400,7 @@ class Dashboard(App[None]):
                         yield Checkbox("Write raw pages", id="write-raw")
                         yield Checkbox("Refetch cached pages", id="refresh")
                         yield Checkbox(
-                            "Skip jobs already staged",
+                            "Skip jobs already present",
                             id="skip-existing-raw",
                             disabled=True,
                         )
@@ -438,22 +437,13 @@ class Dashboard(App[None]):
         self.load_page()
 
     def _paths_note(self) -> str:
-        """Both resolved paths, because they intentionally differ for now.
-
-        New scrapes are staged in data/raw/_json while the established ingest
-        still reads the data/raw/json symlink, so a default scrape followed
-        by a default ingest does NOT yet consume the new files. Ingesting
-        staged pages is an explicit --json-dir choice; silently merging the
-        two roots would let the filename-keyed manifest overwrite newer rows
-        with older copies.
-        """
+        """Show the shared raw corpus and the other active pipeline paths."""
         return (
             f"ingest reads {self.json_dir.resolve()}  |  "
             f"scrape writes {self.raw_dir.resolve()}\n"
             f"Board archive/cache root {self.interim_dir.resolve()}\n"
             f"corpus DB    {self.db_path.resolve()}\n"
-            "Those differ on purpose: a default scrape is staged, not "
-            "ingested. Point --json-dir at it to ingest it."
+            "A default scrape writes directly to the default ingest corpus."
         )
 
     # ----------------------------------------------------------- reactive
@@ -867,7 +857,7 @@ def main() -> None:
         "--raw-dir",
         type=Path,
         default=DEFAULT_RAW_DIR,
-        help="where a scrape stages raw pages",
+        help="where a scrape writes raw pages",
     )
     parser.add_argument(
         "--interim-dir",

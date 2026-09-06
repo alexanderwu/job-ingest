@@ -22,7 +22,7 @@ Usage:
   python scrape_hiringcafe.py --preset DS_SF_Remote --max-jobs 100
   python scrape_hiringcafe.py --url "https://hiringcafe.com/?searchState=..." --max-jobs 100
   python scrape_hiringcafe.py --query "data analyst" --no-descriptions   # fast, cards only
-  python scrape_hiringcafe.py --preset DA_Healthcare --raw-dir data/raw/_json
+  python scrape_hiringcafe.py --preset DA_Healthcare --raw-dir data/raw/json
   python scrape_hiringcafe.py --preset Board_Healthcare --max-jobs 100
   python scrape_hiringcafe.py --url https://hiringcafe.com/b/healthcare-9ierbt6f
 
@@ -32,7 +32,7 @@ are used often enough to be worth naming ship as --preset keys; see
 SAVED_PRESETS and docs/saved_hiringcafe_searches.md. Board keys are
 Board_DS_SF_Remote, Board_DA_SF_Remote, Board_DA_Healthcare, Board_Healthcare.
 Defaults are 50 pages and 40 jobs. --skip-existing-raw requires --raw-dir and
-spends the job budget only on jobs not already staged.
+spends the job budget only on jobs not already present.
 
 Example URL:
   https://hiringcafe.com/?searchState=%7B%22searchQuery%22%3A%22software%20engineer%22%7D
@@ -83,13 +83,8 @@ USER_AGENT = (
     "JobScout/1.0 (personal job search script; contact: alexander.wu7@gmail.com)"
 )
 
-#: Where the dashboard stages newly scraped pages. Deliberately NOT the
-#: `data/raw/json` symlink the established ingest reads: the manifest is keyed
-#: by filename alone, so alternating input roots against one output directory
-#: could overwrite newer rows with older copies. Reconciling the two corpus
-#: roots is its own design task; until then a staged ingest is an explicit
-#: `--json-dir data/raw/_json` with an intentionally chosen output directory.
-DEFAULT_RAW_DIR = Path("data/raw/_json")
+#: Default raw-job corpus shared by the scraper and ingest pipeline.
+DEFAULT_RAW_DIR = Path("data/raw/json")
 DEFAULT_INTERIM_DIR = Path("data/interim")
 
 #: A page/build-id fetch failing after 3 tries aborts the whole run and is
@@ -1018,7 +1013,7 @@ def _scrape(
                 else:
                     pending_hits.append(hit)
             if skipped:
-                yield ScrapeEvent("page", f"  {skipped} already staged, skipped")
+                yield ScrapeEvent("page", f"  {skipped} already present, skipped")
 
             for hit in pending_hits:
                 if jobs >= config.max_jobs:
@@ -1229,7 +1224,7 @@ def main(
     ),
     refresh: bool = typer.Option(False, help="Refetch today's cached Board pages"),
     skip_existing_raw: bool = typer.Option(
-        False, help="Skip jobs already staged in --raw-dir"
+        False, help="Skip jobs already present in --raw-dir"
     ),
     delay: float = typer.Option(
         1.0, "--delay", help="seconds between requests (default 1.0)"
@@ -1242,7 +1237,7 @@ def main(
         "--raw-dir",
         help=(
             "also write ingest-compatible {requisition_id}.json.gz pages here "
-            f"(the dashboard stages them in {DEFAULT_RAW_DIR}); "
+            f"(the dashboard writes them to {DEFAULT_RAW_DIR}); "
             "incompatible with --no-descriptions"
         ),
     ),

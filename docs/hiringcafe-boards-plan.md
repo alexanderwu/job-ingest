@@ -55,7 +55,7 @@ and `job-search/job_search/scrape.py`.
   not an employer's ATS requisition number, so it is safe to use bare — which
   is also what `raw_filename` has been assuming as the corpus key.
 - 4 hits of 2,527 carry **no `requisition_id`**. They are already dropped by the
-  existing truthiness filter, and could never be staged anyway
+  existing truthiness filter, and could never be written anyway
   (`requisition_id` is in `REQUIRED_JOB_KEYS`).
 - `collapse_key` is a much coarser grouping: 1,325 groups over 2,418 unique
   jobs, groups of up to 8, spanning more than one `board_token` only 4 times.
@@ -122,7 +122,7 @@ Example commands after the change:
 job-scrape --preset Board_Healthcare --max-pages 10 --max-jobs 500
 job-scrape --preset Board_Healthcare --refresh          # ignore today's cache
 job-scrape --url https://hiringcafe.com/b/healthcare-9ierbt6f
-job-scrape --preset DS_SF_Remote --raw-dir data/raw/_json --skip-existing-raw
+job-scrape --preset DS_SF_Remote --raw-dir data/raw/json --skip-existing-raw
 ```
 
 ### Job identity and dedup
@@ -214,7 +214,7 @@ job-scrape --preset DS_SF_Remote --raw-dir data/raw/_json --skip-existing-raw
   enabled to additionally save per-job ingest pages.
 - Search sources do not write or read paged interim archives in this change.
 
-### Skipping jobs already staged in `--raw-dir`
+### Skipping jobs already present in `--raw-dir`
 
 Board pages are roughly one request per hundred jobs; the real cost of a re-run
 is the one-or-two detail requests per job. Caching pages alone saves ~1% of a
@@ -227,11 +227,11 @@ re-run, so pair it with:
   `--no-descriptions`, in the same eager-validation block that already rejects
   `--raw-dir` plus `--no-descriptions`.
 - A skipped job does **not** count against `max_jobs`: the budget should be
-  spent on jobs that are not already staged.
-- Report skips as one per-page count (`  12 already staged, skipped`), not one
+  spent on jobs that are not already present.
+- Report skips as one per-page count (`  12 already present, skipped`), not one
   event per job, so the log stays readable.
 - **Do not let the raw-skip filter feed the "no new hits" stop.** The existing
-  loop breaks on `not new_hits`; if every hit on a page is already staged, the
+  loop breaks on `not new_hits`; if every hit on a page is already present, the
   post-skip list is empty and the run would stop early — exactly defeating the
   flag. Keep the defensive stop keyed on the dedup-filtered list and apply the
   raw-skip filter separately.
@@ -417,7 +417,7 @@ In `src/job_ingest/dashboard.py`:
 - Add `--interim-dir` to `job-dash`, store it on `Dashboard`, and include the
   resolved archive root in the paths panel.
 - Add two checkboxes beside the existing `#write-raw` one — "Refetch cached
-  pages" (`--refresh`) and "Skip jobs already staged" (enabled only when
+  pages" (`--refresh`) and "Skip jobs already present" (enabled only when
   `#write-raw` is on). The dashboard is the surface where re-runs actually
   happen, so this is where the cache controls earn their place. Both default
   off, which reproduces today's behaviour apart from the page cache itself.
@@ -470,7 +470,7 @@ Extend `tests/test_scrape_hiringcafe.py` with network-free coverage for:
   requests (assert against a stub client that fails on any call).
 - `--skip-existing-raw`: an existing `{requisition_id}.json.gz` skips the detail
   fetch, skipped jobs do not consume `max_jobs`, a page whose hits are *all*
-  already staged does not stop the run early, and the flag is rejected without
+  already present does not stop the run early, and the flag is rejected without
   `--raw-dir` or with `--no-descriptions`.
 - Board page persistence when descriptions are disabled and when cancellation
   occurs after the page fetch.
@@ -557,7 +557,7 @@ land before the generator starts using it.
   cache (the event says so, no page request is made), then run it with
   `--refresh` and confirm the file is refetched and replaced.
 - Re-run with `--raw-dir <temp>/raw --skip-existing-raw` twice and confirm the
-  second run skips the already-staged jobs and spends its `max_jobs` budget on
+  second run skips the already present jobs and spends its `max_jobs` budget on
   new ones.
 - Run one existing search preset smoke test to confirm its request still uses
   `index.json?searchState=...` and does not create an interim Board directory.

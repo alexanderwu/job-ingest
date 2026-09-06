@@ -16,20 +16,13 @@ takes less than 0.01 seconds.
 
 ## Architecture
 
-New pages are scraped into a *staging* directory, which the default ingest does
-not read yet:
+Scrapes write ingest-compatible raw pages directly to the shared corpus:
 
 ```text
 hiringcafe.com
-        │  job-scrape --raw-dir data/raw/_json
+        │  job-scrape --raw-dir data/raw/json
         │  {"pageProps": {"job": ...}, "__N_SSG": true}, gzipped, atomic
         ▼
-data/raw/_json/*.json.gz          ← staged, ingest only with --json-dir
-```
-
-The established ingest still reads the `data/raw/json` symlink:
-
-```text
 data/raw/json/*.json.gz
         │
         │  fastingest sidecar
@@ -52,20 +45,9 @@ data/raw/json/*.json.gz
                           incremental runs export the full DuckDB table
 ```
 
-This is a **staging loop, not a fully automatic closed loop.** A default scrape
-followed by a default ingest does not yet consume the new files: the two source
-directories differ on purpose. The ingest manifest is keyed by filename alone,
-so alternating input roots against one output directory could overwrite newer
-rows with older copies. To ingest staged pages, say so explicitly and pick an
-output directory deliberately:
-
-```powershell
-uv run src/job_ingest/ingest_and_benchmark.py --json-dir data/raw/_json --out-dir data/processed
-```
-
-Reconciling or merging the two corpus roots is a separate design task. The
-dashboard displays both resolved paths side by side so the discrepancy stays
-visible.
+A default scrape followed by a default ingest consumes the newly written files.
+The ingest manifest is keyed by filename, so use a distinct `--json-dir` only
+when intentionally operating on a separate corpus.
 
 `<out-dir>/.ingest-incomplete` is a durable recovery marker. The sidecar commits
 SQLite and the manifest before Python commits DuckDB; the marker is written
@@ -157,8 +139,8 @@ sidecar into DuckDB and is deleted after loading.
 # One of the four saved searches (see docs/saved_hiringcafe_searches.md).
 just scrape --preset DS_SF_Remote --max-jobs 100
 
-# Stage ingest-compatible raw pages.
-just scrape --preset DA_Healthcare --max-jobs 50 --raw-dir data/raw/_json
+# Write ingest-compatible raw pages to the default ingest corpus.
+just scrape --preset DA_Healthcare --max-jobs 50 --raw-dir data/raw/json
 
 # Ad hoc: at most one of --query, --url, --search-state, --preset.
 just scrape --query "data analyst" --max-jobs 40
@@ -168,7 +150,7 @@ just scrape --url "https://hiringcafe.com/?searchState=..."
 just scrape --preset Board_Healthcare --max-pages 10 --max-jobs 500
 just scrape --url https://hiringcafe.com/b/healthcare-9ierbt6f
 just scrape --preset Board_Healthcare --refresh --interim-dir data/interim
-just scrape --preset Board_Healthcare --raw-dir data/raw/_json --skip-existing-raw
+just scrape --preset Board_Healthcare --raw-dir data/raw/json --skip-existing-raw
 ```
 
 Search `--preset` keys, all sharing the saved full-time/contract, transparent-salary,
@@ -216,7 +198,7 @@ budget remains 40 to keep detail requests bounded. A default Board run reads
 page 0 and stops at 40 jobs. Increase `--max-jobs` to go deeper; cached pages make
 resuming inexpensive.
 
-`--skip-existing-raw` requires `--raw-dir` and skips already-staged jobs before
+`--skip-existing-raw` requires `--raw-dir` and skips jobs already present before
 detail requests, spending the job budget on new jobs. Skipped files retain their
 description, `is_expired` value and mtime, so incremental ingest does not rerun
 for them. Drop the flag to refresh those jobs.
@@ -271,9 +253,9 @@ terminal app; run it.
   sparkline.
 - **Run** — an ingest panel (full rebuild, Parquet, limit), a scrape panel
   (eight presets or Custom search/Board inputs, max jobs/pages, delay,
-  "Write raw pages", "Refetch cached pages", "Skip jobs already staged"),
+  "Write raw pages", "Refetch cached pages", "Skip jobs already present"),
   one shared log, a progress bar, Cancel, and a result summary. Both resolved
-  paths and the Board archive root are shown together. Skipping staged jobs is
+  paths and the Board archive root are shown together. Skipping existing jobs is
   enabled only when raw writing is on; both cache controls default off.
 - **Browse** — search, an "include expired" toggle, a paged table of 200 rows
   at a time, a detail pane, and Previous/Next.

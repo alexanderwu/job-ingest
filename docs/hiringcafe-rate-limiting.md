@@ -85,7 +85,7 @@ Implemented in `src/job_ingest/scrape_hiringcafe.py`:
 ## Verification
 
 Two live runs against the same `Board_DS_SF_Remote` preset, same shape
-(`--max-jobs 150 --max-pages 5-8 --raw-dir data/raw/_json
+(`--max-jobs 150 --max-pages 5-8 --raw-dir data/raw/json
 --skip-existing-raw`), before and after the fix:
 
 | | Before | After |
